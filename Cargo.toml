@@ -1,0 +1,42 @@
+[package]
+name = "mapecd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# ロギング
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 設定管理
+config = "0.14"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# 非同期ランタイム
+tokio = { version = "1", features = ["full"] }
+
+# IP アドレス・プレフィックス計算
+ipnet = "2"
+
+# DHCPv6 パケット生成・解析
+dhcproto = "0.12"
+
+# 低レベルソケット操作（DHCPv6 マルチキャスト用）
+socket2 = "0.5"
+
+# エラーハンドリング
+thiserror = "2"
+anyhow = "1"
+
+# バイト列操作（パケット処理）
+bytes = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# ネットワーク設定（Linux Netlink）
+rtnetlink = "0.14"
+# Unix システムコール（Linux のみ）
+nix = { version = "0.27", features = ["net", "socket"] }
