@@ -97,7 +97,7 @@ ipv4_addr   = ipv4_prefix | ipv4_suffix
 ```
 ce_ipv6 = rule_ipv6_prefix
 ce_ipv6[rule_prefix_len : rule_prefix_len+ea_len] = ea_bits
-ce_ipv6[128-16-16 : 128-16]                       = ipv4_addr (32bits → 下位32bit)
+ce_ipv6[128-48 : 128-16]                           = ipv4_addr (32bits → 下位32bit)
 ce_ipv6[128-16    : 128   ]                        = psid << (16 - k)
 ```
 

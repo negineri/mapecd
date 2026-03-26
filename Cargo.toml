@@ -2,6 +2,7 @@
 name = "mapecd"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 # CLI
@@ -11,8 +12,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# 設定管理
-config = "0.14"
+# 設定管理（TOML ファイル直接パース）
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
@@ -20,7 +20,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 
 # IP アドレス・プレフィックス計算
-ipnet = "2"
+ipnet = { version = "2", features = ["serde"] }
 
 # DHCPv6 パケット生成・解析
 dhcproto = "0.12"
@@ -35,8 +35,22 @@ anyhow = "1"
 # バイト列操作（パケット処理）
 bytes = "1"
 
+# JSON シリアライズ（MAP Rule キャッシュファイル保存・復元）
+serde_json = "1"
+
+# 乱数生成（DHCPv6 Transaction ID 生成）
+rand = "0.9"
+
+# キャンセルトークン（client モードの SIGTERM 対応）
+tokio-util = { version = "0.7", features = ["sync"] }
+
+# AF_PACKET BPF フィルタ設定（SO_ATTACH_FILTER は nix 高レベル API 非対応のため直接使用）
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # ネットワーク設定（Linux Netlink）
 rtnetlink = "0.14"
 # Unix システムコール（Linux のみ）
-nix = { version = "0.27", features = ["net", "socket"] }
+nix = { version = "0.27", features = ["net", "socket", "inotify", "user", "signal", "ifaddrs"] }
+# systemd journal へのログ出力（/run/systemd/journal/socket が存在する場合に優先使用）
+tracing-journald = "0.3"
