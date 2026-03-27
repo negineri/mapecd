@@ -36,8 +36,8 @@ pub struct MapRule {
     pub ipv4_prefix: Ipv4Net,
     /// EA-bits 長
     pub ea_length: u8,
-    /// FME (Forwarding Mapping Rule) フラグ
-    pub is_fme: bool,
+    /// FMR (Forwarding Mapping Rule) フラグ (RFC 7597)
+    pub is_fmr: bool,
     /// BR IPv6 アドレス (OPTION_S46_BR)
     pub br_address: Ipv6Addr,
     /// ポートパラメータ (OPTION_S46_PORTPARAMS)

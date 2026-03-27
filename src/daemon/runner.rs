@@ -554,7 +554,7 @@ mod tests {
             ipv6_prefix: "2001:db8::/32".parse().unwrap(),
             ipv4_prefix: "192.0.2.0/24".parse().unwrap(),
             ea_length: 40,
-            is_fme: true,
+            is_fmr: true,
             br_address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
             port_params: PortParams { psid_offset: 4, psid_length: 8 },
         }

@@ -456,7 +456,7 @@ mod tests {
                 ipv6_prefix: "2001:db8::/32".parse().unwrap(),
                 ipv4_prefix: "192.0.2.0/24".parse().unwrap(),
                 ea_length: 40,
-                is_fme: true,
+                is_fmr: true,
                 br_address: br.parse().unwrap(),
                 port_params: PortParams { psid_offset: 0, psid_length: 0 },
             },

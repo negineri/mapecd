@@ -22,7 +22,7 @@ log_level = "info"
 
 # WAN 側インターフェース名（必須）
 # systemd-networkd が管理する ISP 接続インターフェース
-wan_interface = "eth0"
+upstream_interface = "eth0"
 
 # MAP-E トンネルインターフェース名
 # デフォルト: "mape0"
@@ -42,11 +42,11 @@ mss_clamp = true
 
 [dhcpv6]
 # DHCPv6 パケットの受信方式
-# "capture" : AF_PACKET ソケットで wan_interface 上の DHCPv6 パケットを傍受する
+# "capture" : AF_PACKET ソケットで upstream_interface 上の DHCPv6 パケットを傍受する
 #             systemd-networkd と UDP 546 ポートを共有できるため競合しない
 #             （推奨）
 # "client"  : 独立した DHCPv6 クライアントとして Solicit/Request を送信する
-#             wan_interface で systemd-networkd の DHCPv6 が無効な場合に使用する
+#             upstream_interface で systemd-networkd の DHCPv6 が無効な場合に使用する
 # デフォルト: "capture"
 mode = "capture"
 
@@ -101,7 +101,7 @@ table_name = "mapecd"
 | キー | 型 | 必須 | デフォルト | 説明 |
 | --- | --- | --- | --- | --- |
 | `log_level` | string | いいえ | `"info"` | ログレベル。`trace` / `debug` / `info` / `warn` / `error` |
-| `wan_interface` | string | **はい** | なし | WAN 側インターフェース名 |
+| `upstream_interface` | string | **はい** | なし | WAN 側インターフェース名 |
 | `tunnel_interface` | string | いいえ | `"mape0"` | 作成するトンネルインターフェース名 |
 | `tunnel_mtu` | integer | いいえ | `1460` | トンネル MTU（バイト） |
 | `mss_clamp` | bool | いいえ | `true` | TCP MSS クランプの有効化 |
@@ -114,14 +114,14 @@ table_name = "mapecd"
 
 #### `mode = "capture"` の動作
 
-AF_PACKET ソケットを使って `wan_interface` 上の DHCPv6 パケット（UDP dst port 546）を受信する。
+AF_PACKET ソケットを使って `upstream_interface` 上の DHCPv6 パケット（UDP dst port 546）を受信する。
 systemd-networkd が UDP 546 をバインドしていても競合しない。
 ただし `CAP_NET_RAW` 権限が必要。
 
 #### `mode = "client"` の動作
 
 UDP 546 ポートをバインドし、DHCPv6 Solicit を送信してレスポンスを受信する。
-`wan_interface` 上で systemd-networkd の DHCPv6 クライアントが無効な場合に使用する。
+`upstream_interface` 上で systemd-networkd の DHCPv6 クライアントが無効な場合に使用する。
 `CAP_NET_BIND_SERVICE` 権限が必要。
 
 ### `[networkd]` セクション
@@ -156,8 +156,8 @@ DHCPv6 から取得できない場合の手動設定。このセクション全�
 
 | キー | 型 | 必須 | 説明 |
 | --- | --- | --- | --- |
-| `psid_offset` | integer | はい | PSID offset（a）。v6プラスは `4` |
-| `psid_length` | integer | はい | PSID length（k）。v6プラスは `8` |
+| `psid_offset` | integer | はい | PSID offset（a）。v6プラスは `6` |
+| `psid_length` | integer | はい | PSID length（k）。v6プラスは `6` |
 
 ---
 
@@ -169,7 +169,7 @@ DHCPv6 から取得できない場合の手動設定。このセクション全�
 | 環境変数 | 対応するキー |
 | --- | --- |
 | `MAPECD_LOG_LEVEL` | `log_level` |
-| `MAPECD_WAN_INTERFACE` | `wan_interface` |
+| `MAPECD_UPSTREAM_INTERFACE` | `upstream_interface` |
 | `MAPECD_TUNNEL_INTERFACE` | `tunnel_interface` |
 | `MAPECD_TUNNEL_MTU` | `tunnel_mtu` |
 | `MAPECD_DHCPV6__MODE` | `dhcpv6.mode` |
@@ -183,7 +183,7 @@ DHCPv6 から取得できない場合の手動設定。このセクション全�
 WAN インターフェースのみ指定した最小構成。その他はすべてデフォルト値を使用する。
 
 ```toml
-wan_interface = "eth0"
+upstream_interface = "eth0"
 ```
 
 ---
@@ -193,7 +193,7 @@ wan_interface = "eth0"
 DHCPv6 `capture` モードで v6プラスに接続する典型的な設定。
 
 ```toml
-wan_interface  = "eth0"
+upstream_interface  = "eth0"
 tunnel_interface = "mape0"
 tunnel_mtu     = 1460
 mss_clamp      = true

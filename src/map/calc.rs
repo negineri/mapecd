@@ -134,7 +134,7 @@ mod tests {
             ipv6_prefix: Ipv6Net::from_str(ipv6_prefix).unwrap(),
             ipv4_prefix: Ipv4Net::from_str(ipv4_prefix).unwrap(),
             ea_length,
-            is_fme: true,
+            is_fmr: true,
             br_address: Ipv6Addr::from_str(br).unwrap(),
             port_params: PortParams {
                 psid_offset,

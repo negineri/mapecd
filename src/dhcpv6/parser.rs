@@ -192,7 +192,7 @@ fn parse_s46_rule(payload: &[u8], br_addr: Ipv6Addr) -> Result<MapRule, MapEErro
 
     let flags = payload[pos];
     pos += 1;
-    let is_fme = (flags & 0x01) != 0;
+    let is_fmr = (flags & 0x01) != 0;
 
     let ea_length = payload[pos];
     pos += 1;
@@ -264,7 +264,7 @@ fn parse_s46_rule(payload: &[u8], br_addr: Ipv6Addr) -> Result<MapRule, MapEErro
         ipv6_prefix,
         ipv4_prefix,
         ea_length,
-        is_fme,
+        is_fmr,
         br_address: br_addr,
         port_params,
     })
@@ -439,7 +439,7 @@ mod tests {
 
         let r = &result[0];
         assert_eq!(r.br_address, br);
-        assert!(r.is_fme);
+        assert!(r.is_fmr);
         assert_eq!(r.ea_length, 16);
         assert_eq!(r.ipv4_prefix, Ipv4Net::from_str("192.0.2.0/24").unwrap());
         assert_eq!(r.ipv6_prefix, Ipv6Net::from_str("2001:db8::/32").unwrap());
@@ -486,7 +486,7 @@ mod tests {
 
         let result = parse_mape_container(&msg).unwrap().unwrap();
         assert_eq!(result[0].port_params, PortParams::default());
-        assert!(!result[0].is_fme); // flags = 0x00
+        assert!(!result[0].is_fmr); // flags = 0x00
     }
 
     #[test]
