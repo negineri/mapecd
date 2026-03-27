@@ -582,6 +582,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_br_address_only_recreates_tunnel() {
+        let config = make_config();
+        let old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
+        let new = make_params("2001:db8::1", "192.0.2.1", "2001:db8::fe", 0);
+        let mut state = DaemonState::new();
+        state.tunnel_ifindex = Some(10);
+        let mut nl = MockNl::new();
+        let executor = MockExecutor::default();
+
+        update(&mut state, &config, &old, &new, &mut nl, &executor)
+            .await
+            .unwrap();
+
+        // IPv6 アドレス変更は発生しないこと
+        assert!(nl.deleted_v6.is_empty());
+        assert!(nl.added_v6.is_empty());
+        // 旧トンネルが削除され新トンネルが作成されること（br_address が local パラメータに影響するため）
+        assert!(nl.deleted_links.contains(&10));
+        assert!(!nl.created_tunnels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_ce_ipv4_only_updates_addr_and_nftables() {
+        let config = make_config();
+        let old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
+        let new = make_params("2001:db8::1", "192.0.2.2", "2001:db8::ff", 0);
+        let mut state = DaemonState::new();
+        state.tunnel_ifindex = Some(10);
+        let mut nl = MockNl::new();
+        let executor = MockExecutor::default();
+
+        update(&mut state, &config, &old, &new, &mut nl, &executor)
+            .await
+            .unwrap();
+
+        // トンネル再作成は発生しないこと
+        assert!(nl.created_tunnels.is_empty());
+        assert!(nl.deleted_links.is_empty());
+        // 旧 IPv4 アドレスが削除され新 IPv4 アドレスが追加されること
+        assert!(nl.deleted_v4.iter().any(|(_, a)| *a == old.ipv4));
+        assert!(nl.added_v4.iter().any(|(_, a)| *a == new.ipv4));
+        // nftables も更新されること
+        assert!(!executor.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_update_port_ranges_only_calls_nftables() {
         let config = make_config();
         let mut old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);

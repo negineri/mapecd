@@ -291,19 +291,28 @@ fn iter_opts<F: FnMut(u16, &[u8])>(payload: &[u8], mut f: F) {
 // ────────────────────────────────────────────────────────────────────
 
 /// dhcproto の Option イテレーターから、対象 IAID の IA_PD を探す。
+///
+/// - `iaid` が `Some(id)` の場合: IAID が `id` に一致する IA_PD を優先して返す。
+///   一致するものが存在しない場合は先頭の IA_PD にフォールバックする（RFC 3315 準拠）。
+/// - `iaid` が `None` の場合: 先頭の IA_PD を返す（capture モード）。
 fn find_iapd<'a>(
     opts: impl Iterator<Item = &'a DhcpOption>,
     iaid: Option<u32>,
 ) -> Option<&'a IAPD> {
+    let mut first: Option<&'a IAPD> = None;
     for opt in opts {
         if let DhcpOption::IAPD(iapd) = opt {
             match iaid {
-                Some(id) if iapd.id != id => continue,
-                _ => return Some(iapd),
+                Some(id) if iapd.id == id => return Some(iapd),
+                _ => {
+                    if first.is_none() {
+                        first = Some(iapd);
+                    }
+                }
             }
         }
     }
-    None
+    first
 }
 
 /// IAPREFIX から `Ipv6Net` を構築する。
@@ -536,6 +545,20 @@ mod tests {
         reply_msg(&iapd)
     }
 
+    /// 複数の IA_PD オプションを含む Reply を構築する。
+    fn multi_iapd_reply(iapds: &[(u32, u32, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut all_opts = Vec::new();
+        for (iaid, t1, t2, iaprefix) in iapds {
+            let mut iapd_data = Vec::new();
+            iapd_data.extend_from_slice(&iaid.to_be_bytes());
+            iapd_data.extend_from_slice(&t1.to_be_bytes());
+            iapd_data.extend_from_slice(&t2.to_be_bytes());
+            iapd_data.extend_from_slice(iaprefix);
+            all_opts.extend_from_slice(&opt(25, &iapd_data));
+        }
+        reply_msg(&all_opts)
+    }
+
     #[test]
     fn test_parse_ia_pd_basic() {
         let prefix_ip: Ipv6Addr = "2001:db8:6401::".parse().unwrap();
@@ -548,17 +571,68 @@ mod tests {
 
     #[test]
     fn test_parse_ia_pd_iaid_match() {
-        let prefix_ip: Ipv6Addr = "2001:db8:6401::".parse().unwrap();
-        let iap = iaprefix_opt(1800, 3600, 48, prefix_ip);
-        let msg = iapd_reply(42, 900, 1500, &iap);
+        // 2 つの IA_PD: IAID=42 (/48), IAID=99 (/56)
+        let prefix_42: Ipv6Addr = "2001:db8:6401::".parse().unwrap();
+        let prefix_99: Ipv6Addr = "2001:db8:9900::".parse().unwrap();
+        let iap_42 = iaprefix_opt(1800, 3600, 48, prefix_42);
+        let iap_99 = iaprefix_opt(1800, 3600, 56, prefix_99);
+        let msg = multi_iapd_reply(&[
+            (42, 900, 1500, iap_42),
+            (99, 900, 1500, iap_99),
+        ]);
 
-        // IAID=42 で一致
+        // IAID=42 で一致 → IAID=42 の IA_PD (/48)
         let prefix = parse_ia_pd(&msg, Some(42)).unwrap();
         assert_eq!(prefix.prefix_len(), 48);
 
-        // IAID=1 で不一致 → None
-        let none = parse_ia_pd(&msg, Some(1));
-        assert!(none.is_none());
+        // IAID=99 で一致 → IAID=99 の IA_PD (/56)
+        let prefix = parse_ia_pd(&msg, Some(99)).unwrap();
+        assert_eq!(prefix.prefix_len(), 56);
+
+        // IAID=1 で不一致 → 先頭の IA_PD にフォールバック (/48)
+        let prefix = parse_ia_pd(&msg, Some(1)).unwrap();
+        assert_eq!(prefix.prefix_len(), 48);
+    }
+
+    #[test]
+    fn test_parse_ia_pd_iaid_none_returns_first() {
+        // iaid=None → 先頭の IA_PD を採用する
+        let prefix_first: Ipv6Addr = "2001:db8:1100::".parse().unwrap();
+        let prefix_second: Ipv6Addr = "2001:db8:2200::".parse().unwrap();
+        let iap_first = iaprefix_opt(1800, 3600, 48, prefix_first);
+        let iap_second = iaprefix_opt(1800, 3600, 56, prefix_second);
+        let msg = multi_iapd_reply(&[
+            (1, 900, 1500, iap_first),
+            (2, 900, 1500, iap_second),
+        ]);
+
+        let prefix = parse_ia_pd(&msg, None).unwrap();
+        assert_eq!(prefix.prefix_len(), 48);
+    }
+
+    #[test]
+    fn test_parse_ia_pd_multiple_iaprefix_uses_first() {
+        // 複数の IAPREFIX が含まれる IA_PD → 先頭のみ採用
+        let prefix_first: Ipv6Addr = "2001:db8:aaaa::".parse().unwrap();
+        let prefix_second: Ipv6Addr = "2001:db8:bbbb::".parse().unwrap();
+        let iap_first = iaprefix_opt(1800, 3600, 48, prefix_first);
+        let iap_second = iaprefix_opt(1800, 3600, 56, prefix_second);
+
+        // 2 つの IAPREFIX を 1 つの IA_PD に格納する
+        let mut combined = iap_first.clone();
+        combined.extend_from_slice(&iap_second);
+
+        let mut iapd_data = Vec::new();
+        iapd_data.extend_from_slice(&1u32.to_be_bytes()); // iaid
+        iapd_data.extend_from_slice(&900u32.to_be_bytes()); // t1
+        iapd_data.extend_from_slice(&1500u32.to_be_bytes()); // t2
+        iapd_data.extend_from_slice(&combined);
+        let iapd_opt = opt(25, &iapd_data);
+        let msg = reply_msg(&iapd_opt);
+
+        let prefix = parse_ia_pd(&msg, None).unwrap();
+        // 先頭の IAPREFIX (/48) が採用される
+        assert_eq!(prefix.prefix_len(), 48);
     }
 
     #[test]

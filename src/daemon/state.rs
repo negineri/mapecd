@@ -121,4 +121,22 @@ mod tests {
         state.pending_ia_pd = Some("2001:db9::/48".parse().unwrap());
         assert!(matches!(state.try_compute(), Err(MapEError::NoPrefixMatch)));
     }
+
+    #[test]
+    fn test_try_compute_success() {
+        // Rule IPv6: 2001:db8::/32, ea_length=16 → CE prefix /48 が一致する
+        // CE prefix: 2001:db8:6405::/48 → IPv4=192.0.2.100, PSID=5
+        let mut state = DaemonState::new();
+        state.pending_map_rules =
+            Some(vec![make_rule("2001:db8::/32", "192.0.2.0/24", 16)]);
+        state.pending_ia_pd = Some("2001:db8:6405::/48".parse().unwrap());
+
+        assert_eq!(state.try_compute().unwrap(), true);
+        let params = state.params.as_ref().unwrap();
+        assert_eq!(
+            params.ipv4,
+            "192.0.2.100".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(params.psid, 5);
+    }
 }
