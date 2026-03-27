@@ -132,22 +132,26 @@ async fn run_capture(
     }
 
     // BPF フィルタを SO_ATTACH_FILTER でアタッチ
-    let prog = libc::sock_fprog {
-        len: BPF_FILTER.len() as u16,
-        filter: BPF_FILTER.as_ptr() as *mut libc::sock_filter,
-    };
-    if unsafe {
-        libc::setsockopt(
-            sockfd,
-            libc::SOL_SOCKET,
-            libc::SO_ATTACH_FILTER,
-            &prog as *const libc::sock_fprog as *const libc::c_void,
-            std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
-        )
-    } < 0
+    // prog は *mut sock_filter を含み Send でないため、ブロックスコープで await 前に drop する
     {
-        unsafe { libc::close(sockfd) };
-        return Err(std::io::Error::last_os_error()).context("SO_ATTACH_FILTER failed");
+        let prog = libc::sock_fprog {
+            len: BPF_FILTER.len() as u16,
+            filter: BPF_FILTER.as_ptr() as *mut libc::sock_filter,
+        };
+        if unsafe {
+            libc::setsockopt(
+                sockfd,
+                libc::SOL_SOCKET,
+                libc::SO_ATTACH_FILTER,
+                &prog as *const libc::sock_fprog as *const libc::c_void,
+                std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+            )
+        } < 0
+        {
+            unsafe { libc::close(sockfd) };
+            return Err(std::io::Error::last_os_error()).context("SO_ATTACH_FILTER failed");
+        }
+        // ブロック終了時に prog が drop される
     }
 
     // OwnedFd でラップして AsyncFd に渡す（fd の所有権を移動）
@@ -275,10 +279,10 @@ async fn process_frame(
     }
 
     // トップレベル Status Code が Success 以外 → スキップ
-    if let Some(DhcpOption::StatusCode(status, msg_str)) = msg.opts().get(OptionCode::StatusCode) {
+    if let Some(DhcpOption::StatusCode(sc)) = msg.opts().get(OptionCode::StatusCode) {
         use dhcproto::v6::Status;
-        if *status != Status::Success {
-            warn!(interface = iface, ?status, msg = msg_str, "DHCPv6 Reply non-success status");
+        if sc.status != Status::Success {
+            warn!(interface = iface, status = ?sc.status, msg = sc.msg, "DHCPv6 Reply non-success status");
             return Ok(());
         }
     }

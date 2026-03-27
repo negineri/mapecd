@@ -21,6 +21,7 @@ use crate::{
 const OPT_S46_RULE: u16 = 89;
 const OPT_S46_BR: u16 = 90;
 const OPT_S46_PORTPARAMS: u16 = 93;
+#[cfg(test)]
 const OPT_S46_CONT_MAPE: u16 = 94;
 
 // ────────────────────────────────────────────────────────────────────

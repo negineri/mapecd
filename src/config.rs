@@ -23,6 +23,8 @@ pub struct Config {
     pub tunnel_interface: String,
     #[serde(default)]
     pub tunnel_mtu: Option<u32>,
+    #[serde(default = "default_pid_file")]
+    pub pid_file: PathBuf,
     #[serde(default = "default_map_rules_cache_file")]
     pub map_rules_cache_file: PathBuf,
     #[serde(default = "default_duid_file")]
@@ -30,6 +32,10 @@ pub struct Config {
     /// DHCPv6 受信モード（デフォルト: capture）
     #[serde(default)]
     pub dhcpv6_mode: DhcpV6Mode,
+}
+
+fn default_pid_file() -> PathBuf {
+    PathBuf::from("/run/mapecd.pid")
 }
 
 fn default_map_rules_cache_file() -> PathBuf {

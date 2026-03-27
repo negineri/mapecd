@@ -23,8 +23,14 @@ pub struct DaemonState {
     pub pending_map_rules: Option<Vec<MapRule>>,
     /// IA_PD で割り当てられた CE プレフィックス。
     pub pending_ia_pd: Option<Ipv6Net>,
-    /// 計算済み MAP-E パラメータ。Phase 6 以降で適用処理に使用する。
+    /// 計算済み MAP-E パラメータ（apply 済みのパラメータ）。
     pub params: Option<MapeParams>,
+    /// ip6tnl トンネルの ifindex（create_ip6tnl 後に設定）。
+    pub tunnel_ifindex: Option<u32>,
+    /// ip_forward の元の値（cleanup 時に復元するため保存）。
+    pub original_ip_forward: Option<String>,
+    /// ipv6/conf/all/forwarding の元の値（cleanup 時に復元するため保存）。
+    pub original_ipv6_forward: Option<String>,
 }
 
 impl DaemonState {

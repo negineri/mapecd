@@ -4,6 +4,7 @@
 //! `X-DELEGATED-PREFIX` フィールドの変化を `LeaseEvent` として送出する。
 
 use std::ffi::OsStr;
+use std::os::unix::io::{AsFd as _, AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -15,6 +16,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::LeaseEvent;
+
+/// `nix::Inotify` は `AsFd` を実装するが `AsRawFd` を実装しない（nix 0.29+）。
+/// `tokio::io::unix::AsyncFd` は `AsRawFd` を要求するため、ブリッジラッパーが必要。
+struct InotifyFd(Inotify);
+
+impl AsRawFd for InotifyFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_fd().as_raw_fd()
+    }
+}
 
 const LEASES_DIR: &str = "/run/systemd/netif/leases";
 
@@ -61,7 +72,7 @@ pub async fn run_lease_watcher(
         )
         .context("inotify_add_watch failed")?;
 
-    let async_fd = AsyncFd::new(inotify).context("AsyncFd::new failed")?;
+    let async_fd = AsyncFd::new(InotifyFd(inotify)).context("AsyncFd::new failed")?;
 
     info!(
         interface = upstream_interface,
@@ -80,6 +91,7 @@ pub async fn run_lease_watcher(
                     match guard.try_io(|inner| {
                         inner
                             .get_ref()
+                            .0
                             .read_events()
                             .map_err(std::io::Error::from)
                     }) {

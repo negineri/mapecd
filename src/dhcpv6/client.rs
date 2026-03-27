@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context as _, bail};
 use dhcproto::{
-    v6::{DhcpOption, DhcpOptions, IAPD, Message, MessageType, OptionCode, Status},
+    v6::{DhcpOption, DhcpOptions, IAPD, Message, MessageType, OptionCode, Status, ORO},
     Decodable, Decoder, Encodable, Encoder,
 };
 use nix::net::if_::if_nametoindex;
@@ -22,7 +22,7 @@ use rand::Rng;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::{DhcpV6Event, DhcpV6Receiver};
 use crate::{
@@ -305,7 +305,7 @@ async fn do_renewal_loop(
 
     // Renew フェーズ（T1 ～ T2）
     let renew_xid = new_xid();
-    let mut renew_rt = REN_RETRANS;
+    let renew_rt = REN_RETRANS;
 
     'renew: loop {
         if Instant::now() >= expire_at {
@@ -348,11 +348,11 @@ async fn do_renewal_loop(
                                 DhcpV6Event::IaPdReceived(new_lease.prefix)
                             };
                             let _ = tx.send(event).await;
-                            // 新しいリース情報で継続（再帰しない・ここでは単純に戻る）
-                            return do_renewal_loop(
+                            // 新しいリース情報で継続（Box::pin で再帰 async fn を呼び出す）
+                            return Box::pin(do_renewal_loop(
                                 socket, duid, server_duid, server_unicast,
                                 iaid, iface, &new_lease, tx, cancel,
-                            )
+                            ))
                             .await;
                         }
                         Err(e) => warn!("Renew Reply processing failed: {e}"),
@@ -408,10 +408,10 @@ async fn do_renewal_loop(
                                 DhcpV6Event::IaPdReceived(new_lease.prefix)
                             };
                             let _ = tx.send(event).await;
-                            return do_renewal_loop(
+                            return Box::pin(do_renewal_loop(
                                 socket, duid, server_duid, server_unicast,
                                 iaid, iface, &new_lease, tx, cancel,
-                            )
+                            ))
                             .await;
                         }
                         Err(e) => warn!("Rebind Reply processing failed: {e}"),
@@ -441,11 +441,12 @@ fn build_oro() -> Vec<OptionCode> {
 
 fn build_solicit(duid: &[u8], iaid: u32, xid: [u8; 3], oro: &[OptionCode]) -> anyhow::Result<Vec<u8>> {
     let mut opts = DhcpOptions::new();
-    opts.insert(DhcpOption::ClientId(duid.to_vec().into()));
+    opts.insert(DhcpOption::ClientId(duid.to_vec()));
     opts.insert(DhcpOption::IAPD(IAPD { id: iaid, t1: 0, t2: 0, opts: DhcpOptions::new() }));
-    opts.insert(DhcpOption::ORO(oro.to_vec()));
+    opts.insert(DhcpOption::ORO(ORO { opts: oro.to_vec() }));
 
-    let msg = Message { msg_type: MessageType::Solicit, xid, opts };
+    let mut msg = Message::new_with_id(MessageType::Solicit, xid);
+    msg.set_opts(opts);
     encode_msg(&msg)
 }
 
@@ -457,13 +458,15 @@ fn build_request(
     ia_pd_from_adv: &IAPD,
     oro: &[OptionCode],
 ) -> anyhow::Result<Vec<u8>> {
+    let _ = iaid; // IA_PD に含まれる
     let mut opts = DhcpOptions::new();
-    opts.insert(DhcpOption::ClientId(duid.to_vec().into()));
-    opts.insert(DhcpOption::ServerId(server_duid.to_vec().into()));
+    opts.insert(DhcpOption::ClientId(duid.to_vec()));
+    opts.insert(DhcpOption::ServerId(server_duid.to_vec()));
     opts.insert(DhcpOption::IAPD(ia_pd_from_adv.clone()));
-    opts.insert(DhcpOption::ORO(oro.to_vec()));
+    opts.insert(DhcpOption::ORO(ORO { opts: oro.to_vec() }));
 
-    let msg = Message { msg_type: MessageType::Request, xid, opts };
+    let mut msg = Message::new_with_id(MessageType::Request, xid);
+    msg.set_opts(opts);
     encode_msg(&msg)
 }
 
@@ -475,13 +478,15 @@ fn build_renew(
     ia_pd: &IAPD,
     oro: &[OptionCode],
 ) -> anyhow::Result<Vec<u8>> {
+    let _ = iaid;
     let mut opts = DhcpOptions::new();
-    opts.insert(DhcpOption::ClientId(duid.to_vec().into()));
-    opts.insert(DhcpOption::ServerId(server_duid.to_vec().into()));
+    opts.insert(DhcpOption::ClientId(duid.to_vec()));
+    opts.insert(DhcpOption::ServerId(server_duid.to_vec()));
     opts.insert(DhcpOption::IAPD(ia_pd.clone()));
-    opts.insert(DhcpOption::ORO(oro.to_vec()));
+    opts.insert(DhcpOption::ORO(ORO { opts: oro.to_vec() }));
 
-    let msg = Message { msg_type: MessageType::Renew, xid, opts };
+    let mut msg = Message::new_with_id(MessageType::Renew, xid);
+    msg.set_opts(opts);
     encode_msg(&msg)
 }
 
@@ -492,13 +497,15 @@ fn build_rebind(
     ia_pd: &IAPD,
     oro: &[OptionCode],
 ) -> anyhow::Result<Vec<u8>> {
+    let _ = iaid;
     let mut opts = DhcpOptions::new();
-    opts.insert(DhcpOption::ClientId(duid.to_vec().into()));
+    opts.insert(DhcpOption::ClientId(duid.to_vec()));
     // ServerId は含めない（RFC 3315 Section 18.1.4）
     opts.insert(DhcpOption::IAPD(ia_pd.clone()));
-    opts.insert(DhcpOption::ORO(oro.to_vec()));
+    opts.insert(DhcpOption::ORO(ORO { opts: oro.to_vec() }));
 
-    let msg = Message { msg_type: MessageType::Rebind, xid, opts };
+    let mut msg = Message::new_with_id(MessageType::Rebind, xid);
+    msg.set_opts(opts);
     encode_msg(&msg)
 }
 
@@ -508,13 +515,15 @@ fn build_release(
     iaid: u32,
     ia_pd: IAPD,
 ) -> anyhow::Result<Vec<u8>> {
+    let _ = iaid;
     let xid = new_xid();
     let mut opts = DhcpOptions::new();
-    opts.insert(DhcpOption::ClientId(duid.to_vec().into()));
-    opts.insert(DhcpOption::ServerId(server_duid.to_vec().into()));
+    opts.insert(DhcpOption::ClientId(duid.to_vec()));
+    opts.insert(DhcpOption::ServerId(server_duid.to_vec()));
     opts.insert(DhcpOption::IAPD(ia_pd));
 
-    let msg = Message { msg_type: MessageType::Release, xid, opts };
+    let mut msg = Message::new_with_id(MessageType::Release, xid);
+    msg.set_opts(opts);
     encode_msg(&msg)
 }
 
@@ -540,12 +549,12 @@ fn parse_advertise(data: &[u8], xid: [u8; 3]) -> Option<Message> {
     if msg.msg_type() != MessageType::Advertise {
         return None;
     }
-    if msg.xid != xid {
+    if msg.xid() != xid {
         return None;
     }
     // Status Code チェック
-    if let Some(DhcpOption::StatusCode(status, _)) = msg.opts().get(OptionCode::StatusCode) {
-        if *status != Status::Success {
+    if let Some(DhcpOption::StatusCode(sc)) = msg.opts().get(OptionCode::StatusCode) {
+        if sc.status != Status::Success {
             return None;
         }
     }
@@ -558,7 +567,7 @@ fn parse_reply(data: &[u8], xid: [u8; 3]) -> Option<Message> {
     if msg.msg_type() != MessageType::Reply {
         return None;
     }
-    if msg.xid != xid {
+    if msg.xid() != xid {
         return None;
     }
     Some(msg)
@@ -566,7 +575,7 @@ fn parse_reply(data: &[u8], xid: [u8; 3]) -> Option<Message> {
 
 fn extract_server_duid(msg: &Message) -> Option<Vec<u8>> {
     if let Some(DhcpOption::ServerId(duid)) = msg.opts().get(OptionCode::ServerId) {
-        Some(duid.as_ref().to_vec())
+        Some(duid.clone())
     } else {
         None
     }
@@ -583,7 +592,7 @@ fn extract_ia_pd(msg: &Message) -> Option<IAPD> {
 /// Reply からリース情報を抽出する。
 fn process_reply(
     raw_data: &[u8],
-    duid: &[u8],
+    _duid: &[u8],
     iaid: u32,
     server_duid: Vec<u8>,
     iface: &str,
@@ -592,14 +601,14 @@ fn process_reply(
         .context("Reply decode failed")?;
 
     // トップレベル Status Code
-    if let Some(DhcpOption::StatusCode(status, msg_str)) = msg.opts().get(OptionCode::StatusCode) {
-        if *status != Status::Success {
-            bail!("Reply status code: {:?} ({})", status, msg_str);
+    if let Some(DhcpOption::StatusCode(sc)) = msg.opts().get(OptionCode::StatusCode) {
+        if sc.status != Status::Success {
+            bail!("Reply status code: {:?} ({})", sc.status, sc.msg);
         }
     }
 
-    // OPTION_UNICAST チェック
-    let server_unicast = if let Some(DhcpOption::Unicast(addr)) = msg.opts().get(OptionCode::Unicast) {
+    // OPTION_SERVER_UNICAST チェック
+    let server_unicast = if let Some(DhcpOption::ServerUnicast(addr)) = msg.opts().get(OptionCode::ServerUnicast) {
         let sa: SocketAddr = SocketAddrV6::new(*addr, 547, 0, 0).into();
         Some(sa)
     } else {
@@ -742,7 +751,6 @@ fn load_or_create_duid(config: &Config) -> anyhow::Result<Vec<u8>> {
 /// 取得できない場合は全ゼロ MAC を返し warn ログを出力する。
 fn get_mac_addr(iface: &str) -> [u8; 6] {
     use nix::ifaddrs::getifaddrs;
-    use nix::sys::socket::SockaddrLike as _;
 
     if let Ok(addrs) = getifaddrs() {
         for ifaddr in addrs {
@@ -750,10 +758,11 @@ fn get_mac_addr(iface: &str) -> [u8; 6] {
                 continue;
             }
             if let Some(ref addr) = ifaddr.address {
-                if let Some(ll) = addr.as_sockaddr_ll() {
-                    if ll.sll_halen() == 6 {
-                        let raw = ll.sll_addr();
-                        return [raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]];
+                if let Some(ll) = addr.as_link_addr() {
+                    if ll.halen() == 6 {
+                        if let Some(raw) = ll.addr() {
+                            return raw;
+                        }
                     }
                 }
             }

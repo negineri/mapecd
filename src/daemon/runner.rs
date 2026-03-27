@@ -10,7 +10,9 @@
 //!   (5-a) lease_watcher タスク起動
 //!   (5-b) 初回リースファイル読み込み
 //!
-//! Phase 6 以降で apply/update が追加される。
+//! Phase 8 追加（ステップ 8-3）:
+//!   rtnetlink 接続・lifecycle::apply/update/cleanup 統合
+//!   SIGTERM/SIGINT 時のクリーンアップ
 
 use std::{
     io::Write as _,
@@ -39,8 +41,7 @@ pub async fn start(config: Arc<Config>, cancel: CancellationToken) -> anyhow::Re
     setup_dirs(&config)?;
 
     // PID ファイル作成・二重起動防止
-    let pid_path = Path::new("/run/mapecd/mapecd.pid");
-    let _pid_guard = PidGuard::create(pid_path).context("PID file creation failed")?;
+    let _pid_guard = PidGuard::create(&config.pid_file).context("PID file creation failed")?;
 
     #[cfg(target_os = "linux")]
     return start_linux(config, cancel).await;
@@ -64,12 +65,15 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
 
     use crate::{
         config::DhcpV6Mode,
+        daemon::lifecycle,
         dhcpv6::{
-            DhcpV6Receiver as _, LeaseEvent,
+            DhcpV6Event, DhcpV6Receiver as _, LeaseEvent,
             capture::CaptureReceiver,
             client::ClientReceiver,
             lease_watcher,
         },
+        netlink::RtNetlinkHandle,
+        nftables::manager::NftExecutor,
     };
 
     let mut state = DaemonState::new();
@@ -79,6 +83,20 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
         tracing::info!(path = %config.map_rules_cache_file.display(), rules = rules.len(), "MAP rules loaded from cache");
         state.pending_map_rules = Some(rules);
     }
+
+    // (4) 起動時クリーンアップ（残留設定クリア）
+    {
+        let nft_executor = NftExecutor;
+        startup_cleanup(&config, &nft_executor).await;
+    }
+
+    // rtnetlink 接続
+    let (rtnetlink_conn, rtnetlink_handle, _rtnetlink_messages) =
+        rtnetlink::new_connection().context("rtnetlink::new_connection failed")?;
+    tokio::spawn(rtnetlink_conn);
+
+    let mut nl = RtNetlinkHandle::new(rtnetlink_handle);
+    let executor = NftExecutor;
 
     // DHCPv6 チャネル作成
     let (dhcpv6_tx, dhcpv6_rx) = mpsc::channel::<DhcpV6Event>(16);
@@ -162,10 +180,10 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
             event = opt_recv(&mut dhcpv6_rx_opt) => {
                 match event {
                     Some(DhcpV6Event::IaPdReceived(prefix)) => {
-                        handle_ia_pd(&mut state, prefix);
+                        handle_ia_pd(&mut state, &config, prefix, &mut nl, &executor).await;
                     }
                     Some(DhcpV6Event::Both { rules, ia_pd }) => {
-                        handle_both(&mut state, rules, ia_pd, &config);
+                        handle_both(&mut state, &config, rules, ia_pd, &mut nl, &executor).await;
                     }
                     None => {
                         warn!("DHCPv6 receiver channel closed");
@@ -176,7 +194,7 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
             event = opt_recv(&mut lease_rx_opt) => {
                 match event {
                     Some(LeaseEvent(prefix)) => {
-                        handle_ia_pd(&mut state, prefix);
+                        handle_ia_pd(&mut state, &config, prefix, &mut nl, &executor).await;
                     }
                     None => {
                         lease_rx_opt = None;
@@ -184,6 +202,12 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
                 }
             }
         }
+    }
+
+    // SIGTERM/SIGINT 受信後のクリーンアップ
+    if let Some(params) = state.params.clone() {
+        tracing::info!("running lifecycle cleanup");
+        lifecycle::cleanup(&mut state, &config, &params, &mut nl, &executor).await;
     }
 
     tracing::info!("mapecd daemon stopped");
@@ -195,17 +219,25 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
 // ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn handle_ia_pd(state: &mut DaemonState, prefix: ipnet::Ipv6Net) {
+async fn handle_ia_pd(
+    state: &mut DaemonState,
+    config: &Config,
+    prefix: ipnet::Ipv6Net,
+    nl: &mut impl crate::netlink::NetlinkHandle,
+    executor: &impl crate::nftables::manager::CommandExecutor,
+) {
     state.pending_ia_pd = Some(prefix);
-    apply_if_ready(state);
+    apply_if_ready(state, config, nl, executor).await;
 }
 
 #[cfg(target_os = "linux")]
-fn handle_both(
+async fn handle_both(
     state: &mut DaemonState,
+    config: &Config,
     rules: Vec<MapRule>,
     ia_pd: ipnet::Ipv6Net,
-    config: &Config,
+    nl: &mut impl crate::netlink::NetlinkHandle,
+    executor: &impl crate::nftables::manager::CommandExecutor,
 ) {
     // MAP Rule キャッシュ保存（ステップ 4-5）
     if let Err(e) = save_rules_cache(&config.map_rules_cache_file, &rules) {
@@ -213,22 +245,76 @@ fn handle_both(
     }
     state.pending_map_rules = Some(rules);
     state.pending_ia_pd = Some(ia_pd);
-    apply_if_ready(state);
+    apply_if_ready(state, config, nl, executor).await;
 }
 
 #[cfg(target_os = "linux")]
-fn apply_if_ready(state: &mut DaemonState) {
+async fn apply_if_ready(
+    state: &mut DaemonState,
+    config: &Config,
+    nl: &mut impl crate::netlink::NetlinkHandle,
+    executor: &impl crate::nftables::manager::CommandExecutor,
+) {
+    use crate::daemon::lifecycle;
+
     match state.try_compute() {
         Ok(true) => {
-            if let Some(ref p) = state.params {
+            let new_params = match state.params.clone() {
+                Some(p) => p,
+                None => return,
+            };
+
+            let old_params = state.params.clone();
+
+            // 既存パラメータがある場合は update、ない場合は apply
+            // Note: try_compute が Ok(true) を返した時点で state.params は Some に更新済み
+            // old_params = state.params（更新後）なので、実際の「旧値」は別途管理が必要
+            // ここでは state.params を old_params として、
+            // apply との分岐は tunnel_ifindex の有無で判断する
+            if state.tunnel_ifindex.is_some() {
+                // 既に apply 済み → update
+                if let Some(ref old) = old_params {
+                    if lifecycle::has_changed(old, &new_params) {
+                        tracing::info!(
+                            ce_ipv6 = %new_params.ce_ipv6,
+                            ipv4 = %new_params.ipv4,
+                            psid = new_params.psid,
+                            br = %new_params.br_address,
+                            "MAP-E params changed, updating"
+                        );
+                        if let Err(e) = lifecycle::update(
+                            state,
+                            config,
+                            old,
+                            &new_params,
+                            nl,
+                            executor,
+                        )
+                        .await
+                        {
+                            tracing::error!("lifecycle::update failed: {e}, running cleanup");
+                            lifecycle::cleanup(state, config, &new_params, nl, executor).await;
+                            state.params = None;
+                        }
+                    }
+                    // 変化なしは何もしない
+                }
+            } else {
+                // 初回 apply
                 tracing::info!(
-                    ce_ipv6 = %p.ce_ipv6,
-                    ipv4 = %p.ipv4,
-                    psid = p.psid,
-                    br = %p.br_address,
-                    "MAP-E params computed"
-                    // TODO Phase 6: apply/update
+                    ce_ipv6 = %new_params.ce_ipv6,
+                    ipv4 = %new_params.ipv4,
+                    psid = new_params.psid,
+                    br = %new_params.br_address,
+                    "MAP-E params computed, applying"
                 );
+                if let Err(e) =
+                    lifecycle::apply(state, config, &new_params, nl, executor).await
+                {
+                    tracing::error!("lifecycle::apply failed: {e}, running cleanup");
+                    lifecycle::cleanup(state, config, &new_params, nl, executor).await;
+                    state.params = None;
+                }
             }
         }
         Ok(false) => {} // 情報不足
@@ -240,6 +326,42 @@ fn apply_if_ready(state: &mut DaemonState) {
         }
         Err(e) => {
             tracing::error!("compute_mape_params failed: {e}");
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 起動時クリーンアップ
+// ────────────────────────────────────────────────────────────────────
+
+/// 起動時に残留設定（nftables テーブル・トンネル・ルート）をクリアする。
+///
+/// 前回の異常終了で残留した設定を除去する。エラーは warn で無視する。
+#[cfg(target_os = "linux")]
+async fn startup_cleanup(
+    config: &Config,
+    executor: &impl crate::nftables::manager::CommandExecutor,
+) {
+    use crate::nftables::manager::delete_tables;
+
+    // nftables テーブル削除（存在しない場合はエラーになるが無視）
+    if let Err(e) = delete_tables(executor).await {
+        tracing::debug!("startup: delete nftables tables (may not exist): {e}");
+    }
+
+    // 残留トンネル削除
+    let tunnel_name = &config.tunnel_interface;
+    // ip link delete はシステムコマンドで行う（rtnetlink 接続前のため）
+    let status = tokio::process::Command::new("ip")
+        .args(["link", "delete", tunnel_name])
+        .status()
+        .await;
+    match status {
+        Ok(s) if s.success() => {
+            tracing::info!(tunnel = tunnel_name, "startup: removed residual tunnel");
+        }
+        _ => {
+            tracing::debug!(tunnel = tunnel_name, "startup: no residual tunnel to remove");
         }
     }
 }
@@ -309,6 +431,12 @@ impl PidGuard {
     fn create(path: &Path) -> anyhow::Result<Self> {
         use std::os::unix::io::AsRawFd as _;
 
+        // 親ディレクトリを作成する
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all({}) failed", parent.display()))?;
+        }
+
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -333,6 +461,66 @@ impl PidGuard {
 impl Drop for PidGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// status / stop ヘルパー
+// ────────────────────────────────────────────────────────────────────
+
+/// PID ファイルから PID を読み込み、プロセスの生死を確認して表示する。
+pub fn status(config: &Config) {
+    let pid_path = &config.pid_file;
+    match read_pid_file(pid_path) {
+        None => println!("stopped"),
+        Some(pid) => {
+            if is_process_alive(pid) {
+                println!("running (pid={pid})");
+            } else {
+                println!("stopped (stale PID file)");
+            }
+        }
+    }
+}
+
+/// PID ファイルから PID を取得して SIGTERM を送信する。
+pub fn stop(config: &Config) -> anyhow::Result<()> {
+    let pid_path = &config.pid_file;
+    let pid = read_pid_file(pid_path)
+        .ok_or_else(|| anyhow::anyhow!("mapecd is not running (PID file not found or empty)"))?;
+
+    if !is_process_alive(pid) {
+        anyhow::bail!("mapecd is not running (stale PID file: pid={})", pid);
+    }
+
+    let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if ret != 0 {
+        let e = std::io::Error::last_os_error();
+        anyhow::bail!("failed to send SIGTERM to pid={pid}: {e}");
+    }
+
+    tracing::info!("SIGTERM sent to mapecd (pid={pid})");
+    Ok(())
+}
+
+/// PID ファイルから PID を読み込む。存在しない・パース不可の場合は None。
+fn read_pid_file(path: &Path) -> Option<u32> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content.trim().parse::<u32>().ok()
+}
+
+/// プロセスが生存しているか確認する。
+fn is_process_alive(pid: u32) -> bool {
+    // Linux: /proc/<pid>/status の存在確認
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}/status")).exists()
+    }
+    // 非 Linux: kill(pid, 0) で確認
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        ret == 0
     }
 }
 
@@ -406,5 +594,43 @@ mod tests {
 
         let loaded = load_rules_cache(&cache_path).unwrap();
         assert_eq!(loaded[0].ea_length, 48);
+    }
+
+    #[test]
+    fn test_read_pid_file_missing() {
+        assert!(read_pid_file(Path::new("/nonexistent/mapecd.pid")).is_none());
+    }
+
+    #[test]
+    fn test_read_pid_file_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("mapecd.pid");
+        std::fs::write(&pid_path, "12345\n").unwrap();
+        assert_eq!(read_pid_file(&pid_path), Some(12345));
+    }
+
+    #[test]
+    fn test_read_pid_file_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("mapecd.pid");
+        std::fs::write(&pid_path, "not-a-pid\n").unwrap();
+        assert!(read_pid_file(&pid_path).is_none());
+    }
+
+    #[test]
+    fn test_is_process_alive_current() {
+        // 自プロセスは生存しているはず
+        let pid = std::process::id();
+        assert!(is_process_alive(pid));
+    }
+
+    #[test]
+    fn test_is_process_alive_nonexistent() {
+        // Linux: /proc/<pid>/status が存在しない PID を使う
+        // macOS: kill(pid, 0) が ESRCH を返す PID を使う
+        // pid_t は i32 なので u32::MAX は不可（オーバーフロー）
+        // 存在しないはずの大きい PID を使う（i32 の最大値付近）
+        let unlikely_pid = i32::MAX as u32;  // 2147483647: 通常存在しない
+        assert!(!is_process_alive(unlikely_pid));
     }
 }
