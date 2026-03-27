@@ -678,4 +678,54 @@ mod tests {
         assert_eq!(info.t2, u32::MAX);
         assert_eq!(info.valid_lifetime, u32::MAX);
     }
+
+    #[test]
+    fn test_parse_ia_pd_info_t1_zero_only_complemented() {
+        // T1=0, T2 は明示値 → T1 のみ valid_lifetime から補完
+        let prefix_ip: Ipv6Addr = "2001:db8:6401::".parse().unwrap();
+        let iap = iaprefix_opt(1800, 3600, 48, prefix_ip);
+        let msg = iapd_reply(1, 0, 1440, &iap);
+
+        let info = parse_ia_pd_info(&msg, None).unwrap();
+        assert_eq!(info.valid_lifetime, 3600);
+        assert_eq!(info.t1, 1800); // 3600 / 2 で補完
+        assert_eq!(info.t2, 1440); // 明示値をそのまま使用
+    }
+
+    #[test]
+    fn test_parse_ia_pd_info_t2_zero_only_complemented() {
+        // T2=0, T1 は明示値 → T2 のみ valid_lifetime から補完
+        let prefix_ip: Ipv6Addr = "2001:db8:6401::".parse().unwrap();
+        let iap = iaprefix_opt(1800, 3600, 48, prefix_ip);
+        let msg = iapd_reply(1, 900, 0, &iap);
+
+        let info = parse_ia_pd_info(&msg, None).unwrap();
+        assert_eq!(info.valid_lifetime, 3600);
+        assert_eq!(info.t1, 900);  // 明示値をそのまま使用
+        assert_eq!(info.t2, 2880); // 3600 * 4 / 5 で補完
+    }
+
+    #[test]
+    fn test_parse_ia_pd_status_code_non_success_returns_none() {
+        // IA_PD サブオプションに Status Code (NoAddrsAvail=2) が含まれる場合は None を返す
+        let prefix_ip: Ipv6Addr = "2001:db8:6401::".parse().unwrap();
+        let iap = iaprefix_opt(1800, 3600, 48, prefix_ip);
+
+        // StatusCode option: code=13, payload=[status_hi, status_lo]
+        // status=2 (NoAddrsAvail)
+        let sc_opt = opt(13, &[0x00u8, 0x02]);
+
+        let mut iapd_data = Vec::new();
+        iapd_data.extend_from_slice(&1u32.to_be_bytes()); // iaid
+        iapd_data.extend_from_slice(&900u32.to_be_bytes()); // t1
+        iapd_data.extend_from_slice(&1500u32.to_be_bytes()); // t2
+        iapd_data.extend_from_slice(&iap);
+        iapd_data.extend_from_slice(&sc_opt); // 非 Success ステータス
+
+        let iapd_opt = opt(25, &iapd_data);
+        let msg = reply_msg(&iapd_opt);
+
+        assert!(parse_ia_pd(&msg, None).is_none());
+        assert!(parse_ia_pd_info(&msg, None).is_none());
+    }
 }

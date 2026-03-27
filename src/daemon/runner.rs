@@ -633,4 +633,71 @@ mod tests {
         let unlikely_pid = i32::MAX as u32;  // 2147483647: 通常存在しない
         assert!(!is_process_alive(unlikely_pid));
     }
+
+    // ─── 二重起動防止テスト ───────────────────────────────────
+
+    #[test]
+    fn test_pid_guard_create_succeeds() {
+        // PID ファイルが存在しない場合は正常に作成できる
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("mapecd.pid");
+
+        let guard = PidGuard::create(&pid_path);
+        assert!(guard.is_ok());
+
+        // PID ファイルが作成されていること
+        assert!(pid_path.exists());
+        // PID ファイルに自プロセスの PID が書き込まれていること
+        let content = std::fs::read_to_string(&pid_path).unwrap();
+        let written_pid: u32 = content.trim().parse().unwrap();
+        assert_eq!(written_pid, std::process::id());
+    }
+
+    // macOS では flock が同一プロセスで再取得可能なため Linux 専用テスト
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_pid_guard_double_start_blocked() {
+        // 同一 PID ファイルに対して 2 つの PidGuard を作成しようとすると
+        // 2 つ目は flock で失敗する（二重起動防止）
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("mapecd.pid");
+
+        let _guard1 = PidGuard::create(&pid_path).expect("first guard should succeed");
+        let guard2 = PidGuard::create(&pid_path);
+        assert!(guard2.is_err(), "second guard should fail (already locked)");
+    }
+
+    #[test]
+    fn test_pid_guard_stale_file_can_be_acquired() {
+        // 前回プロセスが異常終了して PID ファイルが残っていても
+        // ロックが解放されていれば再取得できる（stale PID ファイルの上書き）
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("mapecd.pid");
+
+        // 残留 PID ファイルを手動作成（ロックなし）
+        std::fs::write(&pid_path, "99999\n").unwrap();
+
+        // ロックが取得できるはず
+        let guard = PidGuard::create(&pid_path);
+        assert!(guard.is_ok(), "should succeed on stale (unlocked) PID file");
+
+        // 自プロセスの PID で上書きされていること
+        let content = std::fs::read_to_string(&pid_path).unwrap();
+        let written_pid: u32 = content.trim().parse().unwrap();
+        assert_eq!(written_pid, std::process::id());
+    }
+
+    #[test]
+    fn test_pid_guard_drop_removes_file() {
+        // PidGuard が Drop されると PID ファイルが削除される
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("mapecd.pid");
+
+        {
+            let _guard = PidGuard::create(&pid_path).unwrap();
+            assert!(pid_path.exists());
+        }
+        // Drop 後はファイルが消えていること
+        assert!(!pid_path.exists());
+    }
 }
