@@ -4,7 +4,20 @@ use serde::Deserialize;
 
 use crate::error::MapEError;
 
-#[derive(Debug, Deserialize)]
+/// DHCPv6 受信モード。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DhcpV6Mode {
+    /// AF_PACKET パッシブキャプチャモード（デフォルト）。
+    /// systemd-networkd 等の既存 DHCPv6 クライアントと競合しない。
+    #[default]
+    Capture,
+    /// 独立 DHCPv6 クライアントモード。
+    /// 他の DHCPv6 クライアントが動作していない場合に使用する。
+    Client,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub upstream_interface: String,
     pub tunnel_interface: String,
@@ -14,6 +27,9 @@ pub struct Config {
     pub map_rules_cache_file: PathBuf,
     #[serde(default = "default_duid_file")]
     pub duid_file: PathBuf,
+    /// DHCPv6 受信モード（デフォルト: capture）
+    #[serde(default)]
+    pub dhcpv6_mode: DhcpV6Mode,
 }
 
 fn default_map_rules_cache_file() -> PathBuf {
@@ -115,6 +131,7 @@ mod tests {
             PathBuf::from("/run/mapecd/rules.cache")
         );
         assert_eq!(cfg.duid_file, PathBuf::from("/var/lib/mapecd/duid"));
+        assert_eq!(cfg.dhcpv6_mode, DhcpV6Mode::Capture);
     }
 
     #[test]
@@ -315,5 +332,32 @@ mod tests {
         "#,
         );
         assert!(matches!(result, Err(MapEError::InvalidConfig(_))));
+    }
+
+    // --- dhcpv6_mode ---
+
+    #[test]
+    fn test_dhcpv6_mode_default_is_capture() {
+        let cfg = parse(
+            r#"
+            upstream_interface = "eth0"
+            tunnel_interface = "ip6tnl0"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.dhcpv6_mode, DhcpV6Mode::Capture);
+    }
+
+    #[test]
+    fn test_dhcpv6_mode_client() {
+        let cfg = parse(
+            r#"
+            upstream_interface = "eth0"
+            tunnel_interface = "ip6tnl0"
+            dhcpv6_mode = "client"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.dhcpv6_mode, DhcpV6Mode::Client);
     }
 }

@@ -1,11 +1,13 @@
 mod cli;
-mod config;
-mod error;
+
+use std::sync::Arc;
 
 use clap::Parser;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 use crate::cli::{Cli, Command};
+use mapecd::{config::Config, daemon::runner};
 
 #[tokio::main]
 async fn main() {
@@ -13,17 +15,22 @@ async fn main() {
 
     init_logging(&cli.log_level);
 
+    let cancel = CancellationToken::new();
+
     match &cli.command {
         Some(Command::Start) | None => {
-            match config::Config::load(&cli.config) {
+            match Config::load(&cli.config) {
                 Ok(cfg) => {
                     tracing::info!(
                         upstream = %cfg.upstream_interface,
                         tunnel = %cfg.tunnel_interface,
+                        mode = ?cfg.dhcpv6_mode,
                         "config loaded"
                     );
-                    // TODO: Phase 4 以降でデーモンループを実装
-                    tracing::info!("mapecd starting (not yet implemented)");
+                    if let Err(e) = runner::start(Arc::new(cfg), cancel).await {
+                        error!("daemon error: {e:#}");
+                        std::process::exit(1);
+                    }
                 }
                 Err(e) => {
                     error!("failed to load config: {e}");
@@ -45,8 +52,7 @@ async fn main() {
 fn init_logging(log_level: &str) {
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let filter = EnvFilter::try_new(log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     #[cfg(target_os = "linux")]
     {

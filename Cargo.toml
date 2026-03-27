@@ -54,3 +54,7 @@ rtnetlink = "0.14"
 nix = { version = "0.29", features = ["net", "socket", "inotify", "user", "signal"] }
 # systemd journal へのログ出力（/run/systemd/journal/socket が存在する場合に優先使用）
 tracing-journald = "0.3"
+
+[dev-dependencies]
+# テンポラリディレクトリ（キャッシュ読み書きテスト用）
+tempfile = "3"
