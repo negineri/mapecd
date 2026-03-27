@@ -1,4 +1,4 @@
-//! デーモンメインランナー（Phase 4 スタブ）
+//! デーモンメインランナー
 //!
 //! Phase 4 実装範囲:
 //!   (1) PID ファイル原子的作成・二重起動防止
@@ -6,7 +6,11 @@
 //!   (3) MAP Rule キャッシュ読み込み
 //!   (7) DhcpV6Receiver 起動・select! イベントループ
 //!
-//! Phase 5/6 以降で lease_watcher・apply/update が追加される。
+//! Phase 5 追加:
+//!   (5-a) lease_watcher タスク起動
+//!   (5-b) 初回リースファイル読み込み
+//!
+//! Phase 6 以降で apply/update が追加される。
 
 use std::{
     io::Write as _,
@@ -60,21 +64,53 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
 
     use crate::{
         config::DhcpV6Mode,
-        dhcpv6::{DhcpV6Receiver as _, LeaseEvent, capture::CaptureReceiver, client::ClientReceiver},
+        dhcpv6::{
+            DhcpV6Receiver as _, LeaseEvent,
+            capture::CaptureReceiver,
+            client::ClientReceiver,
+            lease_watcher,
+        },
     };
 
     let mut state = DaemonState::new();
 
     // (3) MAP Rule キャッシュ読み込み
     if let Some(rules) = load_rules_cache(&config.map_rules_cache_file) {
-        info!(path = %config.map_rules_cache_file.display(), rules = rules.len(), "MAP rules loaded from cache");
+        tracing::info!(path = %config.map_rules_cache_file.display(), rules = rules.len(), "MAP rules loaded from cache");
         state.pending_map_rules = Some(rules);
     }
 
     // DHCPv6 チャネル作成
     let (dhcpv6_tx, dhcpv6_rx) = mpsc::channel::<DhcpV6Event>(16);
-    // lease_watcher チャネル（Phase 5 で watcher を起動する）
-    let (_lease_tx, lease_rx) = mpsc::channel::<LeaseEvent>(4);
+    // lease_watcher チャネル
+    let (lease_tx, lease_rx) = mpsc::channel::<LeaseEvent>(4);
+
+    // (5-a) lease_watcher タスク起動（inotify 登録を先に行う）
+    {
+        let lease_interface = config.upstream_interface.clone();
+        let lease_tx_watcher = lease_tx.clone();
+        let lease_cancel = cancel.child_token();
+        tokio::spawn(async move {
+            if let Err(e) = lease_watcher::run_lease_watcher(
+                &lease_interface,
+                lease_tx_watcher,
+                lease_cancel,
+            )
+            .await
+            {
+                tracing::error!("lease_watcher error: {e:#}");
+            }
+        });
+    }
+
+    // (5-b) 初回リースファイル読み込み（inotify 登録後・イベントループ開始前）
+    // inotify 登録 → 初回読み込みの順序により、登録前のファイル更新を見落とさない
+    if let Some(path) = lease_watcher::lease_file_path(&config.upstream_interface) {
+        if let Some(prefix) = lease_watcher::parse_lease_file(&path) {
+            tracing::info!(prefix = %prefix, "initial IA_PD loaded from lease file");
+            let _ = lease_tx.send(LeaseEvent(prefix)).await;
+        }
+    }
 
     // (7) DhcpV6Receiver 起動
     let child_cancel = cancel.child_token();
@@ -101,7 +137,7 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
     let mut sigterm = signal(SignalKind::terminate()).context("SIGTERM handler setup failed")?;
     let mut sigint = signal(SignalKind::interrupt()).context("SIGINT handler setup failed")?;
 
-    info!("mapecd daemon started");
+    tracing::info!("mapecd daemon started");
 
     // select! イベントループ
     let mut dhcpv6_rx_opt = Some(dhcpv6_rx);
@@ -110,17 +146,17 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
     loop {
         tokio::select! {
             _ = sigterm.recv() => {
-                info!("SIGTERM received, shutting down");
+                tracing::info!("SIGTERM received, shutting down");
                 cancel.cancel();
                 break;
             }
             _ = sigint.recv() => {
-                info!("SIGINT received, shutting down");
+                tracing::info!("SIGINT received, shutting down");
                 cancel.cancel();
                 break;
             }
             _ = cancel.cancelled() => {
-                info!("cancellation requested");
+                tracing::info!("cancellation requested");
                 break;
             }
             event = opt_recv(&mut dhcpv6_rx_opt) => {
@@ -150,7 +186,7 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
         }
     }
 
-    info!("mapecd daemon stopped");
+    tracing::info!("mapecd daemon stopped");
     Ok(())
 }
 

@@ -4,6 +4,8 @@ pub mod parser;
 pub mod capture;
 #[cfg(target_os = "linux")]
 pub mod client;
+#[cfg(target_os = "linux")]
+pub mod lease_watcher;
 
 use ipnet::Ipv6Net;
 
