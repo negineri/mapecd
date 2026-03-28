@@ -15,6 +15,7 @@ pub struct TestNetNs {
     name: String,
 }
 
+#[allow(dead_code)]
 impl TestNetNs {
     /// 新しいランダム名の Network Namespace を作成する。
     pub fn create() -> anyhow::Result<Self> {

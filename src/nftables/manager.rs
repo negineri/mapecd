@@ -106,6 +106,8 @@ pub fn generate_ruleset(
 ) -> String {
     let port_elements = format_port_elements(port_ranges);
 
+    let masquerade_rules = format_masquerade_rules(port_ranges, tunnel_interface);
+
     format!(
         r#"add table ip mapecd
 flush table ip mapecd
@@ -121,7 +123,7 @@ table ip mapecd {{
 
     chain postrouting {{
         type nat hook postrouting priority srcnat;
-        oifname "{tunnel_interface}" masquerade to :@port_ranges
+{masquerade_rules}
     }}
 
     chain forward {{
@@ -139,6 +141,28 @@ table ip6 mapecd {{
 }}
 "#
     )
+}
+
+/// 各ポート範囲に対して `masquerade to :port[-port]` ルールを生成する。
+///
+/// `masquerade to :@set` は nft の古いバージョンやカーネルではサポートされないため、
+/// ポート範囲ごとに個別のルールを展開する。
+/// `meta l4proto { tcp, udp }` がポートマッチの前提条件として必要。
+fn format_masquerade_rules(port_ranges: &[RangeInclusive<u16>], tunnel_interface: &str) -> String {
+    port_ranges
+        .iter()
+        .map(|r| {
+            let port_spec = if r.start() == r.end() {
+                r.start().to_string()
+            } else {
+                format!("{}-{}", r.start(), r.end())
+            };
+            format!(
+                "        oifname \"{tunnel_interface}\" meta l4proto {{ tcp, udp }} masquerade to :{port_spec}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// ポート範囲を nftables の `elements = { ... }` 形式にフォーマットする。
@@ -268,7 +292,9 @@ mod tests {
         let ranges = vec![1u16..=65535u16];
         let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
 
-        assert!(ruleset.contains("oifname \"ip6tnl0\" masquerade to :@port_ranges"));
+        assert!(ruleset.contains(
+            "oifname \"ip6tnl0\" meta l4proto { tcp, udp } masquerade to :1-65535"
+        ));
     }
 
     #[test]

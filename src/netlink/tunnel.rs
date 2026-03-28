@@ -87,7 +87,18 @@ pub async fn create_ip6tnl(
     send_newlink(handle, msg).await?;
 
     // 作成後に RTM_GETLINK で ifindex を取得
-    get_link_index(handle, name).await
+    let ifindex = get_link_index(handle, name).await?;
+
+    // トンネルインターフェースを UP 状態にする
+    handle
+        .link()
+        .set(ifindex)
+        .up()
+        .execute()
+        .await
+        .map_err(|e| MapEError::NetlinkError(format!("set link {name} up: {e}")))?;
+
+    Ok(ifindex)
 }
 
 /// 指定 ifindex のリンクを削除する。
