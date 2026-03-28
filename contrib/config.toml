@@ -1,0 +1,25 @@
+# mapecd 設定ファイル
+# デフォルトパス: /etc/mapecd/config.toml
+# 起動時に --config <path> オプションで変更できます。
+
+# ── インターフェース設定（必須）────────────────────────────────────────────
+
+# WAN 側インターフェース名
+upstream_interface = "eth0"
+
+# MAP-E トンネルインターフェース名
+tunnel_interface = "mape0"
+
+# ── オプション設定 ────────────────────────────────────────────────────────
+
+# トンネルインターフェースの MTU（バイト）
+# IPv6 ヘッダー 40 bytes 分を差し引いた値を推奨
+# tunnel_mtu = 1460
+
+# DHCPv6 パケットの受信方式
+# "capture" : AF_PACKET で傍受（systemd-networkd と共存可能、推奨）
+# "client"  : 独立 DHCPv6 クライアントとして動作
+# dhcpv6_mode = "capture"
+
+# v6プラス向け組み込み静的 MAP ルール（690 件）を使用する場合は true
+# use_v6plus_static_rules = false

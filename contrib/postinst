@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure|abort-upgrade|abort-deconfigure|abort-remove)
+        if [ -x "/usr/bin/systemctl" ]; then
+            systemctl daemon-reload
+        fi
+    ;;
+esac
+
+#DEBHELPER#

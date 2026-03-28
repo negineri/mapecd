@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libclang-dev
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache cargo bin (bpf-linker, cargo-deb)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-bpf-linker-cargo-deb-v1
+
+      - name: Install bpf-linker
+        run: which bpf-linker || cargo install bpf-linker
+
+      - name: Install cargo-deb
+        run: which cargo-deb || cargo install cargo-deb
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build .deb package
+        run: cargo deb --no-build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/debian/*.deb
+          generate_release_notes: true
+          fail_on_unmatched_files: true

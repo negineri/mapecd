@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge|disappear|abort-install|abort-upgrade)
+        if [ -x "/usr/bin/systemctl" ]; then
+            systemctl daemon-reload
+        fi
+    ;;
+esac
+
+#DEBHELPER#

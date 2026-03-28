@@ -7,6 +7,28 @@ name = "mapecd"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+description = "MAP-E CE daemon — RFC 7597 MAP-E client for Linux via DHCPv6"
+authors = ["negineri <negineri@sfc.wide.ad.jp>"]
+
+[package.metadata.deb]
+maintainer = "negineri <negineri@sfc.wide.ad.jp>"
+extended-description = """\
+mapecd is a MAP-E (RFC 7597) DHCPv6 client daemon for Linux.
+It retrieves MAP-E configuration via DHCPv6 (RFC 7598 OPTION_S46_CONT_MAPE),
+calculates EA-bits, PSID and port sets, and configures the Linux kernel
+with IPv6/IPv4 addresses, ip6tnl tunnels, default routes and nftables rules.
+Supports v6plus static rule tables (690 built-in rules)."""
+section = "net"
+priority = "optional"
+depends = "$auto, nftables (>= 0.9.3), iproute2"
+assets = [
+    { source = "target/release/mapecd", dest = "usr/sbin/mapecd", mode = "0755" },
+    { source = "contrib/config.toml", dest = "etc/mapecd/config.toml", mode = "0644" },
+    { source = "README.md", dest = "usr/share/doc/mapecd/README.md", mode = "0644" },
+]
+conf-files = ["/etc/mapecd/config.toml"]
+maintainer-scripts = "contrib"
+systemd-units = { unit-name = "mapecd", unit-scripts = "contrib", enable = false, start = false }
 
 [dependencies]
 # CLI
