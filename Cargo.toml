@@ -64,3 +64,11 @@ tracing-journald = "0.3"
 [dev-dependencies]
 # テンポラリディレクトリ（キャッシュ読み書きテスト用）
 tempfile = "3"
+# UUID 生成（Network Namespace 名のユニーク化）
+uuid = { version = "1", features = ["v4"] }
+# テスト用非同期ランタイムユーティリティ
+tokio = { version = "1", features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Network Namespace 操作（setns, open 等）
+nix = { version = "0.29", features = ["sched", "fs"] }
