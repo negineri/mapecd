@@ -78,11 +78,13 @@ DHCPv6 で取得した MAP Rule と、systemd-networkd が取得した IA_PD 情
 
 MAP-E では利用できるポート番号が PSID によって制限される。nftables を用いてこの制約を強制する。
 
-- SNAT ルールをポートセットに限定する（許可ポート範囲の Masquerade）
-- PSID に属さないポートからの送信をブロックする
-- 設定更新時にルールセットを原子的に入れ替える
+- `ip mapecd` テーブルに SNAT ルールを設定し、送信を許可ポートセットに限定する（`masquerade to :@port_ranges`）
+- `ip mapecd` テーブルの `forward` チェーンで TCP MSS クランプを設定する（`tcp option maxseg size set rt mtu`）
+- `ip6 mapecd` テーブルでブリッジリレー以外からの IPv4-in-IPv6 カプセル受信をドロップする
+- 設定更新時にルールセットを原子的に入れ替える（`nft -f -` への一括適用）
+- nftables テーブル名は固定で `mapecd`
 
-**入力**: ポートセット（利用可能ポート範囲一覧）、トンネルインターフェース名
+**入力**: ポートセット（利用可能ポート範囲一覧）、トンネルインターフェース名、BR IPv6 アドレス
 **出力**: nftables ルールセットの適用
 
 #### 7. IA_PD プレフィックスの監視
