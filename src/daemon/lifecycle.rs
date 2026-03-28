@@ -17,6 +17,7 @@
 use crate::{
     config::Config,
     daemon::state::DaemonState,
+    ebpf::manager::{EbpfHandle, psid_config_from_params},
     error::MapEError,
     map::{port_set::calc_port_ranges, rule::MapeParams},
     netlink::NetlinkHandle,
@@ -48,8 +49,8 @@ fn write_sysctl(path: &str, value: &str) -> Result<(), MapEError> {
 /// MAP-E 設定を全て適用する。
 ///
 /// 失敗した場合は呼び出し元で即座に `cleanup` を呼ぶこと。
-pub async fn apply(
-    state: &mut DaemonState,
+pub async fn apply<E: EbpfHandle>(
+    state: &mut DaemonState<E>,
     config: &Config,
     params: &MapeParams,
     nl: &mut impl NetlinkHandle,
@@ -80,7 +81,10 @@ pub async fn apply(
     // Step 5: IPv4 デフォルトルート追加（add_ipv4_default_route が既存ルートを削除してから追加）
     nl.add_ipv4_default_route(tunnel_ifindex).await?;
 
-    // Step 6: nftables ルールセット適用
+    // Step 5.5: eBPF ロード + TC リンク（nftables 適用より前、トンネル作成後）
+    apply_step5_5_ebpf(state, config, params).await?;
+
+    // Step 6: nftables ルールセット適用（staging range ルールに切り替わる前に BPF がリンク済みであること）
     apply_step6_nftables(config, params, executor).await?;
 
     Ok(())
@@ -93,8 +97,8 @@ pub async fn apply(
 /// 差分のみを更新する。変化がない場合は何もしない（呼び出し元で判断済み）。
 ///
 /// 失敗した場合は呼び出し元で `cleanup` を呼ぶこと。
-pub async fn update(
-    state: &mut DaemonState,
+pub async fn update<E: EbpfHandle>(
+    state: &mut DaemonState<E>,
     config: &Config,
     old: &MapeParams,
     new: &MapeParams,
@@ -111,7 +115,7 @@ pub async fn update(
         }
         nl.add_ipv6_addr(upstream_ifindex, new.ce_ipv6).await?;
 
-        // トンネル delete → create → Steps 4〜6
+        // トンネル delete → create → Steps 4〜6（BPF 含む）
         recreate_tunnel_and_apply(state, config, new, nl, executor).await?;
     } else if old.br_address != new.br_address {
         // Steps 3〜6: br_address のみ変化
@@ -133,6 +137,18 @@ pub async fn update(
         apply_step6_nftables(config, new, executor).await?;
     }
 
+    // CONFIG_MAP を新パラメータで更新（全ケース共通）
+    if let Some(ebpf) = &mut state.ebpf {
+        match psid_config_from_params(new) {
+            Ok(cfg) => {
+                if let Err(e) = ebpf.update_config(&cfg).await {
+                    tracing::warn!("EbpfManager::update_config failed: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("psid_config_from_params for update failed: {e}"),
+        }
+    }
+
     Ok(())
 }
 
@@ -143,8 +159,8 @@ pub async fn update(
 /// apply の逆順で設定を削除する。
 ///
 /// 各ステップの失敗は warn ログで続行する（部分的クリーンアップを最大化）。
-pub async fn cleanup(
-    state: &mut DaemonState,
+pub async fn cleanup<E: EbpfHandle>(
+    state: &mut DaemonState<E>,
     config: &Config,
     params: &MapeParams,
     nl: &mut impl NetlinkHandle,
@@ -152,9 +168,17 @@ pub async fn cleanup(
 ) {
     let tunnel_ifindex = state.tunnel_ifindex;
 
-    // Step 1: nftables テーブル削除
+    // Step 1: nftables テーブル削除（BPF アンリンクより先に実施する）
+    // nftables staging range ルールを先に削除しないと BPF なしで staging ポートが WAN に漏れる
     if let Err(e) = delete_tables(executor).await {
         tracing::warn!("delete nftables tables failed: {e}");
+    }
+
+    // Step 1.5: eBPF TC リンク解除（nftables 削除後）
+    if let Some(mut ebpf) = state.ebpf.take() {
+        if let Err(e) = ebpf.unlink_tc().await {
+            tracing::warn!("EbpfManager::unlink_tc failed: {e}");
+        }
     }
 
     // Step 2: IPv4 デフォルトルート削除（トンネル oif でフィルタ）
@@ -210,8 +234,8 @@ pub async fn cleanup(
 // ────────────────────────────────────────────────────────────
 
 /// Step 2: CE IPv6 /128 付与
-async fn apply_step2_add_ipv6(
-    _state: &mut DaemonState,
+async fn apply_step2_add_ipv6<E>(
+    _state: &mut DaemonState<E>,
     config: &Config,
     params: &MapeParams,
     nl: &mut impl NetlinkHandle,
@@ -221,8 +245,8 @@ async fn apply_step2_add_ipv6(
 }
 
 /// Step 3: ip6tnl トンネル作成
-async fn apply_step3_create_tunnel(
-    state: &mut DaemonState,
+async fn apply_step3_create_tunnel<E>(
+    state: &mut DaemonState<E>,
     config: &Config,
     params: &MapeParams,
     nl: &mut impl NetlinkHandle,
@@ -249,24 +273,60 @@ async fn apply_step3_create_tunnel(
     Ok(())
 }
 
+/// Step 5.5: eBPF ロード + TC リンク
+async fn apply_step5_5_ebpf<E: EbpfHandle>(
+    state: &mut DaemonState<E>,
+    config: &Config,
+    params: &MapeParams,
+) -> Result<(), MapEError> {
+    let psid_cfg = psid_config_from_params(params)?;
+    let mut ebpf = E::load(&psid_cfg).await?;
+    ebpf.link_tc(&config.tunnel_interface).await?;
+    state.ebpf = Some(ebpf);
+    Ok(())
+}
+
 /// Step 6: nftables ルールセット適用
 async fn apply_step6_nftables(
     config: &Config,
     params: &MapeParams,
     executor: &impl CommandExecutor,
 ) -> Result<(), MapEError> {
+    use crate::ebpf::manager::psid_config_from_params;
+
     let port_ranges = calc_port_ranges(&params.rule.port_params, params.psid);
-    apply_ruleset(executor, &port_ranges, &config.tunnel_interface, params.br_address).await
+    let staging_range = psid_config_from_params(params)
+        .map(|cfg| (cfg.staging_min, cfg.staging_max))
+        .unwrap_or_else(|_| {
+            // フォールバック: PsidConfig 生成失敗時は全ポート範囲
+            tracing::warn!("psid_config_from_params failed; using full port range for staging");
+            (1, 65535)
+        });
+    apply_ruleset(
+        executor,
+        &port_ranges,
+        &config.tunnel_interface,
+        params.br_address,
+        staging_range,
+    )
+    .await
 }
 
 /// トンネル delete → create → Step 4〜6 を実行する（update 共通処理）
-async fn recreate_tunnel_and_apply(
-    state: &mut DaemonState,
+async fn recreate_tunnel_and_apply<E: EbpfHandle>(
+    state: &mut DaemonState<E>,
     config: &Config,
     new: &MapeParams,
     nl: &mut impl NetlinkHandle,
     executor: &impl CommandExecutor,
 ) -> Result<(), MapEError> {
+    // BPF アンリンク（nftables 削除より前）
+    if let Some(mut ebpf) = state.ebpf.take() {
+        if let Err(e) = ebpf.unlink_tc().await {
+            tracing::warn!("EbpfManager::unlink_tc before recreate failed: {e}");
+        }
+    }
+
     // 旧トンネル削除
     if let Some(oif) = state.tunnel_ifindex {
         if let Err(e) = nl.del_ipv4_default_route_by_oif(oif).await {
@@ -289,6 +349,9 @@ async fn recreate_tunnel_and_apply(
     // IPv4 デフォルトルート
     nl.add_ipv4_default_route(tunnel_ifindex).await?;
 
+    // BPF 再ロード + リンク（nftables 再適用より前）
+    apply_step5_5_ebpf(state, config, new).await?;
+
     // nftables
     apply_step6_nftables(config, new, executor).await
 }
@@ -307,6 +370,7 @@ pub fn has_changed(old: &MapeParams, new: &MapeParams) -> bool {
         || old.psid != new.psid
         || old.br_address != new.br_address
         || old.port_ranges != new.port_ranges
+        || old.rule.port_params != new.rule.port_params
 }
 
 // ────────────────────────────────────────────────────────────
@@ -322,11 +386,45 @@ mod tests {
 
     use super::*;
     use crate::{
+        ebpf::manager::EbpfHandle,
         error::MapEError,
         map::rule::{CeFormat, MapRule, MapeParams, PortParams},
         netlink::NetlinkHandle,
         nftables::manager::CommandExecutor,
     };
+
+    // テスト用型エイリアス（BPF 不要なテストでの型推論を明示）
+    type TestState = DaemonState<MockEbpfHandle>;
+
+    // ─── MockEbpfHandle ──────────────────────────────────────
+
+    #[derive(Default)]
+    struct MockEbpfHandle {
+        pub linked: bool,
+    }
+
+    impl EbpfHandle for MockEbpfHandle {
+        async fn load(_params: &mapecd_common::PsidConfig) -> Result<Self, MapEError> {
+            Ok(Self { linked: false })
+        }
+
+        async fn link_tc(&mut self, _interface: &str) -> Result<(), MapEError> {
+            self.linked = true;
+            Ok(())
+        }
+
+        async fn update_config(
+            &mut self,
+            _params: &mapecd_common::PsidConfig,
+        ) -> Result<(), MapEError> {
+            Ok(())
+        }
+
+        async fn unlink_tc(&mut self) -> Result<(), MapEError> {
+            self.linked = false;
+            Ok(())
+        }
+    }
 
     // ─── Mock NetlinkHandle ──────────────────────────────────
 
@@ -491,13 +589,21 @@ mod tests {
         assert!(has_changed(&old, &new));
     }
 
+    #[test]
+    fn test_has_changed_port_params() {
+        let old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
+        let mut new = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
+        new.rule.port_params = PortParams { psid_offset: 4, psid_length: 8 };
+        assert!(has_changed(&old, &new));
+    }
+
     // ─── apply テスト（mock によるステップ確認）──────────────
 
     #[tokio::test]
     async fn test_apply_sets_tunnel_ifindex() {
         let config = make_config();
         let params = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         let mut nl = MockNl::new();
         let executor = MockExecutor::default();
 
@@ -528,7 +634,7 @@ mod tests {
     async fn test_cleanup_clears_state() {
         let config = make_config();
         let params = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         state.tunnel_ifindex = Some(10);
         state.original_ip_forward = Some("0".to_string());
         state.original_ipv6_forward = Some("0".to_string());
@@ -547,7 +653,7 @@ mod tests {
     async fn test_cleanup_without_tunnel_does_not_panic() {
         let config = make_config();
         let params = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         // tunnel_ifindex が None（apply 前に cleanup が呼ばれた場合）
         let mut nl = MockNl::new();
         let executor = MockExecutor::default();
@@ -561,7 +667,7 @@ mod tests {
         let config = make_config();
         let old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
         let new = make_params("2001:db8::2", "192.0.2.2", "2001:db8::ff", 0);
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         state.tunnel_ifindex = Some(10);
         let mut nl = MockNl::new();
         let executor = MockExecutor::default();
@@ -585,7 +691,7 @@ mod tests {
         let config = make_config();
         let old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
         let new = make_params("2001:db8::1", "192.0.2.1", "2001:db8::fe", 0);
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         state.tunnel_ifindex = Some(10);
         let mut nl = MockNl::new();
         let executor = MockExecutor::default();
@@ -607,7 +713,7 @@ mod tests {
         let config = make_config();
         let old = make_params("2001:db8::1", "192.0.2.1", "2001:db8::ff", 0);
         let new = make_params("2001:db8::1", "192.0.2.2", "2001:db8::ff", 0);
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         state.tunnel_ifindex = Some(10);
         let mut nl = MockNl::new();
         let executor = MockExecutor::default();
@@ -634,7 +740,7 @@ mod tests {
         // port_ranges を変化させる
         old.port_ranges = vec![1u16..=65535u16];
         new.port_ranges = vec![4101u16..=4356u16];
-        let mut state = DaemonState::new();
+        let mut state = TestState::new();
         state.tunnel_ifindex = Some(10);
         let mut nl = MockNl::new();
         let executor = MockExecutor::default();

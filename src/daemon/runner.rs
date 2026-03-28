@@ -326,26 +326,41 @@ async fn apply_if_ready(
                 match old_params {
                     Some(ref old) => {
                         if lifecycle::has_changed(old, &new_params) {
-                            tracing::info!(
-                                ce_ipv6 = %new_params.ce_ipv6,
-                                ipv4 = %new_params.ipv4,
-                                psid = new_params.psid,
-                                br = %new_params.br_address,
-                                "MAP-E params changed, updating"
-                            );
-                            if let Err(e) = lifecycle::update(
-                                state,
-                                config,
-                                old,
-                                &new_params,
-                                nl,
-                                executor,
-                            )
-                            .await
-                            {
-                                tracing::error!("lifecycle::update failed: {e}, running cleanup");
-                                lifecycle::cleanup(state, config, &new_params, nl, executor).await;
-                                state.params = None;
+                            // a/k (port_params) が変化した場合は cleanup → apply でフルリセット
+                            if old.rule.port_params != new_params.rule.port_params {
+                                tracing::info!(
+                                    "MAP-E port_params (a/k) changed, running cleanup and re-apply"
+                                );
+                                lifecycle::cleanup(state, config, old, nl, executor).await;
+                                if let Err(e) =
+                                    lifecycle::apply(state, config, &new_params, nl, executor).await
+                                {
+                                    tracing::error!("lifecycle::apply after port_params change failed: {e}");
+                                    lifecycle::cleanup(state, config, &new_params, nl, executor).await;
+                                    state.params = None;
+                                }
+                            } else {
+                                tracing::info!(
+                                    ce_ipv6 = %new_params.ce_ipv6,
+                                    ipv4 = %new_params.ipv4,
+                                    psid = new_params.psid,
+                                    br = %new_params.br_address,
+                                    "MAP-E params changed, updating"
+                                );
+                                if let Err(e) = lifecycle::update(
+                                    state,
+                                    config,
+                                    old,
+                                    &new_params,
+                                    nl,
+                                    executor,
+                                )
+                                .await
+                                {
+                                    tracing::error!("lifecycle::update failed: {e}, running cleanup");
+                                    lifecycle::cleanup(state, config, &new_params, nl, executor).await;
+                                    state.params = None;
+                                }
                             }
                         }
                         // 変化なしは何もしない

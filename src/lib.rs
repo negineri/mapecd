@@ -1,6 +1,8 @@
 pub mod config;
 pub mod daemon;
 pub mod dhcpv6;
+#[cfg(target_os = "linux")]
+pub mod ebpf;
 pub mod error;
 pub mod map;
 pub mod nftables;

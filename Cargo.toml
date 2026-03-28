@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "mapecd-common", "mapecd-ebpf"]
+resolver = "2"
+
 [package]
 name = "mapecd"
 version = "0.1.0"
@@ -47,7 +51,15 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # AF_PACKET BPF フィルタ設定（SO_ATTACH_FILTER は nix 高レベル API 非対応のため直接使用）
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.build-dependencies]
+# eBPF クロスコンパイル（BPF ELF を build.rs でビルドするために使用）
+aya-build = "0.1"
+
 [target.'cfg(target_os = "linux")'.dependencies]
+# eBPF ローダー（TC BPF プログラムのロード・TC アタッチに使用）
+aya = { version = "0.13", features = ["async_tokio"] }
+# eBPF / userspace 共有型
+mapecd-common = { path = "mapecd-common" }
 # ネットワーク設定（Linux Netlink）
 rtnetlink = "0.14"
 # Netlink パケット型定義（ip6tnl など rtnetlink 未サポート型の raw NLA エンコードに使用）

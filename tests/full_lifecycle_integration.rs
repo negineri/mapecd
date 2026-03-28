@@ -6,10 +6,13 @@ use common::netns::TestNetNs;
 use mapecd::config::{Config, DhcpV6Mode};
 use mapecd::daemon::lifecycle;
 use mapecd::daemon::state::DaemonState;
+use mapecd::ebpf::EbpfManager;
 use mapecd::map::port_set::calc_port_ranges;
 use mapecd::map::rule::{CeFormat, MapRule, MapeParams, PortParams};
 use mapecd::netlink::{NetlinkHandle, RtNetlinkHandle};
 use mapecd::nftables::manager::NftExecutor;
+
+type LiveState = DaemonState<EbpfManager>;
 
 fn make_config() -> Config {
     Config {
@@ -77,7 +80,7 @@ async fn test_lifecycle_apply_in_netns() {
             5,
             "2001:db8:ff::1",
         );
-        let mut state = DaemonState::new();
+        let mut state = LiveState::new();
 
         let result = lifecycle::apply(&mut state, &config, &params, &mut nl, &executor).await;
 
@@ -115,7 +118,7 @@ async fn test_lifecycle_update_ce_ipv6_in_netns() {
         let config = make_config();
         let old_params = make_params("2001:db8::1", "192.0.2.1", 5, "2001:db8:ff::1");
         let new_params = make_params("2001:db8::2", "192.0.2.2", 6, "2001:db8:ff::1");
-        let mut state = DaemonState::new();
+        let mut state = LiveState::new();
 
         // apply を実行する
         let result = lifecycle::apply(&mut state, &config, &old_params, &mut nl, &executor).await;
@@ -163,7 +166,7 @@ async fn test_lifecycle_update_port_ranges_in_netns() {
         let config = make_config();
         let old_params = make_params("2001:db8::1", "192.0.2.1", 5, "2001:db8:ff::1");
         let new_params = make_params("2001:db8::1", "192.0.2.1", 6, "2001:db8:ff::1");
-        let mut state = DaemonState::new();
+        let mut state = LiveState::new();
 
         // apply を実行する
         let result = lifecycle::apply(&mut state, &config, &old_params, &mut nl, &executor).await;
@@ -210,7 +213,7 @@ async fn test_lifecycle_cleanup_in_netns() {
         let executor = NftExecutor;
         let config = make_config();
         let params = make_params("2001:db8::1", "192.0.2.1", 5, "2001:db8:ff::1");
-        let mut state = DaemonState::new();
+        let mut state = LiveState::new();
 
         // apply を実行する
         let result = lifecycle::apply(&mut state, &config, &params, &mut nl, &executor).await;

@@ -15,8 +15,8 @@ async fn test_apply_and_delete_ruleset() {
     let port_ranges = vec![4101u16..=4356u16, 8197u16..=8452u16];
     let br_address: std::net::Ipv6Addr = "2001:db8:ff::1".parse().unwrap();
 
-    // ルールセットを適用する
-    let result = apply_ruleset(&executor, &port_ranges, "lo", br_address).await;
+    // ルールセットを適用する（staging_range: a=4, k=8 の場合）
+    let result = apply_ruleset(&executor, &port_ranges, "lo", br_address, (4096, 4335)).await;
     if let Err(e) = &result {
         // 権限不足の場合はスキップ
         let msg = e.to_string();
@@ -39,7 +39,7 @@ async fn test_ruleset_syntax_valid() {
 
     let port_ranges = vec![4101u16..=4356u16, 8197u16..=8452u16];
     let br_address: std::net::Ipv6Addr = "2001:db8:ff::1".parse().unwrap();
-    let ruleset = generate_ruleset(&port_ranges, "lo", br_address);
+    let ruleset = generate_ruleset(&port_ranges, "lo", br_address, (4096, 4335));
 
     // nft -c -f - でシンタックスチェックする
     let mut child = match Command::new("nft")
@@ -77,7 +77,7 @@ async fn test_ruleset_syntax_valid() {
 async fn test_port_ranges_in_nft_set() {
     let port_ranges = vec![4101u16..=4101u16, 4357u16..=4612u16];
     let br_address: std::net::Ipv6Addr = "2001:db8:ff::1".parse().unwrap();
-    let ruleset = generate_ruleset(&port_ranges, "lo", br_address);
+    let ruleset = generate_ruleset(&port_ranges, "lo", br_address, (4096, 4335));
 
     // 単一ポートと範囲の両方が含まれることを確認する
     assert!(

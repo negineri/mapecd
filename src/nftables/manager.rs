@@ -92,9 +92,10 @@ impl CommandExecutor for NftExecutor {
 /// nftables ルールセット文字列を生成する純粋関数。
 ///
 /// # 引数
-/// - `port_ranges`: CE に割り当てられたポート範囲（空の場合は呼び出し元で検証済みであること）
+/// - `port_ranges`: CE に割り当てられたポート範囲（set port_ranges 定義に使用）
 /// - `tunnel_interface`: ip6tnl トンネルインターフェース名
 /// - `br_address`: BR の IPv6 アドレス（ingress フィルタで使用）
+/// - `staging_range`: eBPF staging range `(min, max)`。masquerade に使用する単一連続レンジ。
 ///
 /// # Panics
 /// `port_ranges` が空の場合は呼び出し元で `EmptyPortRanges` ガードを実行すること。
@@ -103,10 +104,10 @@ pub fn generate_ruleset(
     port_ranges: &[RangeInclusive<u16>],
     tunnel_interface: &str,
     br_address: Ipv6Addr,
+    staging_range: (u16, u16),
 ) -> String {
     let port_elements = format_port_elements(port_ranges);
-
-    let masquerade_rules = format_masquerade_rules(port_ranges, tunnel_interface);
+    let (staging_min, staging_max) = staging_range;
 
     format!(
         r#"add table ip mapecd
@@ -123,7 +124,7 @@ table ip mapecd {{
 
     chain postrouting {{
         type nat hook postrouting priority srcnat;
-{masquerade_rules}
+        oifname "{tunnel_interface}" meta l4proto {{ tcp, udp, icmp }} masquerade to :{staging_min}-{staging_max}
     }}
 
     chain forward {{
@@ -141,28 +142,6 @@ table ip6 mapecd {{
 }}
 "#
     )
-}
-
-/// 各ポート範囲に対して `masquerade to :port[-port]` ルールを生成する。
-///
-/// `masquerade to :@set` は nft の古いバージョンやカーネルではサポートされないため、
-/// ポート範囲ごとに個別のルールを展開する。
-/// `meta l4proto { tcp, udp }` がポートマッチの前提条件として必要。
-fn format_masquerade_rules(port_ranges: &[RangeInclusive<u16>], tunnel_interface: &str) -> String {
-    port_ranges
-        .iter()
-        .map(|r| {
-            let port_spec = if r.start() == r.end() {
-                r.start().to_string()
-            } else {
-                format!("{}-{}", r.start(), r.end())
-            };
-            format!(
-                "        oifname \"{tunnel_interface}\" meta l4proto {{ tcp, udp }} masquerade to :{port_spec}"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// ポート範囲を nftables の `elements = { ... }` 形式にフォーマットする。
@@ -200,12 +179,13 @@ pub async fn apply_ruleset(
     port_ranges: &[RangeInclusive<u16>],
     tunnel_interface: &str,
     br_address: Ipv6Addr,
+    staging_range: (u16, u16),
 ) -> Result<(), MapEError> {
     if port_ranges.is_empty() {
         return Err(MapEError::EmptyPortRanges);
     }
 
-    let ruleset = generate_ruleset(port_ranges, tunnel_interface, br_address);
+    let ruleset = generate_ruleset(port_ranges, tunnel_interface, br_address, staging_range);
     executor.execute(&ruleset).await
 }
 
@@ -267,12 +247,17 @@ mod tests {
         "2001:db8::1".parse().unwrap()
     }
 
+    // テスト用デフォルト staging range（a=4, k=8 の場合）
+    fn default_staging() -> (u16, u16) {
+        (4096, 4335)
+    }
+
     // ─── generate_ruleset スナップショットテスト ─────────────
 
     #[test]
     fn test_generate_ruleset_contains_flush() {
         let ranges = vec![1u16..=65535u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(ruleset.contains("flush table ip mapecd"));
         assert!(ruleset.contains("flush table ip6 mapecd"));
@@ -281,46 +266,35 @@ mod tests {
     #[test]
     fn test_generate_ruleset_contains_table_names() {
         let ranges = vec![1u16..=65535u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(ruleset.contains("table ip mapecd"));
         assert!(ruleset.contains("table ip6 mapecd"));
     }
 
     #[test]
-    fn test_generate_ruleset_masquerade() {
-        let ranges = vec![1u16..=65535u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+    fn test_generate_ruleset_masquerade_staging_range() {
+        // eBPF 版: staging range の単一ルールが生成されること
+        let ranges = vec![4176u16..=4191u16, 8272u16..=8287u16];
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), (4096, 4335));
 
-        assert!(ruleset.contains(
-            "oifname \"ip6tnl0\" meta l4proto { tcp, udp } masquerade to :1-65535"
-        ));
-    }
-
-    #[test]
-    fn test_generate_ruleset_masquerade_multiple_ranges() {
-        let ranges = vec![4101u16..=4356u16, 8197u16..=8452u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
-
-        // 各ポート範囲に対して個別の masquerade ルールが生成されること
         assert!(
             ruleset.contains(
-                "oifname \"ip6tnl0\" meta l4proto { tcp, udp } masquerade to :4101-4356"
+                "oifname \"ip6tnl0\" meta l4proto { tcp, udp, icmp } masquerade to :4096-4335"
             ),
-            "first range masquerade rule should be present"
+            "staging range masquerade rule should be present"
         );
+        // 旧形式（複数ルール）は存在しないこと
         assert!(
-            ruleset.contains(
-                "oifname \"ip6tnl0\" meta l4proto { tcp, udp } masquerade to :8197-8452"
-            ),
-            "second range masquerade rule should be present"
+            !ruleset.contains("masquerade to :4176"),
+            "old per-range masquerade should not be present"
         );
     }
 
     #[test]
     fn test_generate_ruleset_mss_clamp_both_directions() {
         let ranges = vec![1u16..=65535u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(
             ruleset.contains("oifname \"ip6tnl0\" tcp flags syn tcp option maxseg size set rt mtu")
@@ -334,7 +308,7 @@ mod tests {
     fn test_generate_ruleset_br_filter() {
         let br = "2001:db8::ffff".parse::<Ipv6Addr>().unwrap();
         let ranges = vec![1u16..=65535u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br);
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br, default_staging());
 
         assert!(ruleset.contains("ip6 saddr != 2001:db8::ffff ip6 nexthdr 4 drop"));
     }
@@ -342,7 +316,7 @@ mod tests {
     #[test]
     fn test_generate_ruleset_single_port_element() {
         let ranges = vec![4101u16..=4101u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(ruleset.contains("elements = { 4101 }"));
     }
@@ -350,7 +324,7 @@ mod tests {
     #[test]
     fn test_generate_ruleset_port_range_element() {
         let ranges = vec![4101u16..=4356u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(ruleset.contains("elements = { 4101-4356 }"));
     }
@@ -358,7 +332,7 @@ mod tests {
     #[test]
     fn test_generate_ruleset_multiple_ranges() {
         let ranges = vec![4101u16..=4101u16, 4357u16..=4357u16, 8197u16..=8452u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(ruleset.contains("4101, 4357, 8197-8452"));
     }
@@ -366,7 +340,7 @@ mod tests {
     #[test]
     fn test_generate_ruleset_full_range() {
         let ranges = vec![1u16..=65535u16];
-        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br(), default_staging());
 
         assert!(ruleset.contains("elements = { 1-65535 }"));
     }
@@ -376,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn test_apply_ruleset_empty_port_ranges_returns_error() {
         let executor = MockExecutor::new();
-        let result = apply_ruleset(&executor, &[], "ip6tnl0", br()).await;
+        let result = apply_ruleset(&executor, &[], "ip6tnl0", br(), default_staging()).await;
 
         assert!(matches!(result, Err(MapEError::EmptyPortRanges)));
         // executor.execute は呼ばれないこと
@@ -387,7 +361,7 @@ mod tests {
     async fn test_apply_ruleset_calls_executor() {
         let executor = MockExecutor::new();
         let ranges = vec![1u16..=65535u16];
-        apply_ruleset(&executor, &ranges, "ip6tnl0", br())
+        apply_ruleset(&executor, &ranges, "ip6tnl0", br(), default_staging())
             .await
             .unwrap();
 
@@ -400,7 +374,7 @@ mod tests {
     async fn test_apply_ruleset_propagates_executor_error() {
         let executor = MockExecutor::failing();
         let ranges = vec![1u16..=65535u16];
-        let result = apply_ruleset(&executor, &ranges, "ip6tnl0", br()).await;
+        let result = apply_ruleset(&executor, &ranges, "ip6tnl0", br(), default_staging()).await;
 
         assert!(matches!(result, Err(MapEError::NftError(_))));
     }

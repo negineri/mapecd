@@ -1,0 +1,8 @@
+[package]
+name = "mapecd-common"
+version = "0.1.0"
+edition = "2024"
+
+# no_std 対応（BPF クレートから参照されるため）
+[features]
+default = []

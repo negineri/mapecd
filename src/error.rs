@@ -30,4 +30,7 @@ pub enum MapEError {
 
     #[error("nft error: {0}")]
     NftError(String),
+
+    #[error("eBPF error: {0}")]
+    EbpfError(String),
 }
