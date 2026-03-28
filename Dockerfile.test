@@ -5,6 +5,13 @@ RUN apt-get update && apt-get install -y \
     iproute2 \
     clang \
     llvm \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# eBPF クロスコンパイル用 nightly ツールチェイン（rust-toolchain.toml に合わせる）
+RUN rustup toolchain install nightly-2026-03-27 --component rust-src
+
+# bpf-linker は Rust 1.88+ が必要なので nightly ツールチェインでインストール
+RUN cargo +nightly-2026-03-27 install bpf-linker
 
 WORKDIR /workspace
