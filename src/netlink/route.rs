@@ -125,7 +125,7 @@ mod tests {
 
     use crate::{
         error::MapEError,
-        netlink::{NetlinkHandle, route},
+        netlink::NetlinkHandle,
     };
 
     struct MockHandle {

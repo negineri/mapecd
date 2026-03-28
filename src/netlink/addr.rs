@@ -99,7 +99,7 @@ mod tests {
 
     use crate::{
         error::MapEError,
-        netlink::{NetlinkHandle, addr},
+        netlink::NetlinkHandle,
     };
 
     /// テスト用 mock。addr 操作を記録する。

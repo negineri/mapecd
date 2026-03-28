@@ -317,11 +317,8 @@ pub fn has_changed(old: &MapeParams, new: &MapeParams) -> bool {
 mod tests {
     use std::{
         net::{Ipv4Addr, Ipv6Addr},
-        ops::RangeInclusive,
         sync::{Arc, Mutex},
     };
-
-    use ipnet::Ipv6Net;
 
     use super::*;
     use crate::{
@@ -437,6 +434,7 @@ mod tests {
             map_rules_cache_file: "/run/mapecd/rules.cache".into(),
             duid_file: "/var/lib/mapecd/duid".into(),
             dhcpv6_mode: crate::config::DhcpV6Mode::Capture,
+            use_v6plus_static_rules: false,
         }
     }
 

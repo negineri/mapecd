@@ -492,6 +492,7 @@ fn setup_dirs(config: &Config) -> anyhow::Result<()> {
 /// PID ファイルを保持するガード型。Drop 時にファイルを削除する。
 struct PidGuard {
     path: std::path::PathBuf,
+    _file: std::fs::File,
 }
 
 impl PidGuard {
@@ -523,7 +524,7 @@ impl PidGuard {
         file.set_len(0)?;
         write!(file, "{}\n", std::process::id())?;
 
-        Ok(Self { path: path.to_path_buf() })
+        Ok(Self { path: path.to_path_buf(), _file: file })
     }
 }
 
