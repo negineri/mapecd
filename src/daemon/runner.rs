@@ -27,7 +27,7 @@ use tracing::warn;
 use crate::{config::Config, map::rule::MapRule};
 
 #[cfg(target_os = "linux")]
-use crate::{daemon::state::DaemonState, error::MapEError};
+use crate::{daemon::state::DaemonState, error::MapEError, map::v6plus_rules};
 
 // ────────────────────────────────────────────────────────────────────
 // エントリポイント
@@ -78,10 +78,28 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
 
     let mut state = DaemonState::new();
 
-    // (3) MAP Rule キャッシュ読み込み
-    if let Some(rules) = load_rules_cache(&config.map_rules_cache_file) {
-        tracing::info!(path = %config.map_rules_cache_file.display(), rules = rules.len(), "MAP rules loaded from cache");
-        state.pending_map_rules = Some(rules);
+    // fail-fast: 静的ルール有効時はルール件数をコンパイル時定数と照合する
+    if config.use_v6plus_static_rules {
+        anyhow::ensure!(
+            v6plus_rules::V6PLUS_MAP_RULES.len() == v6plus_rules::RULE_COUNT
+                && v6plus_rules::RULE_COUNT > 0,
+            "v6plus static MAP rules are invalid: count={}, RULE_COUNT={}",
+            v6plus_rules::V6PLUS_MAP_RULES.len(),
+            v6plus_rules::RULE_COUNT,
+        );
+        tracing::info!(
+            rules = v6plus_rules::RULE_COUNT,
+            "v6plus static MAP rules enabled; using static rules (cache and DHCPv6 rules ignored)"
+        );
+        state.pending_map_rules = Some(v6plus_rules::V6PLUS_MAP_RULES.to_vec());
+    } else {
+        // (3) MAP Rule キャッシュ読み込み（静的ルール無効時のみ）
+        if let Some(rules) = load_rules_cache(&config.map_rules_cache_file) {
+            tracing::info!(path = %config.map_rules_cache_file.display(), rules = rules.len(), "MAP rules loaded from cache");
+            state.pending_map_rules = Some(rules);
+        } else {
+            tracing::info!("no MAP rules cache; waiting for DHCPv6 rules");
+        }
     }
 
     // (4) 起動時クリーンアップ（残留設定クリア）
@@ -226,6 +244,14 @@ async fn handle_ia_pd(
     nl: &mut impl crate::netlink::NetlinkHandle,
     executor: &impl crate::nftables::manager::CommandExecutor,
 ) {
+    // 静的ルール有効時: /56 以外の IA_PD は設定不整合として処理を打ち切る
+    if config.use_v6plus_static_rules && !is_valid_ia_pd_for_static_rules(&prefix) {
+        tracing::error!(
+            ia_pd = %prefix,
+            "IA_PD prefix length is not /56; expected /56 for v6plus static rules (ignoring)"
+        );
+        return;
+    }
     state.pending_ia_pd = Some(prefix);
     apply_if_ready(state, config, nl, executor).await;
 }
@@ -239,13 +265,31 @@ async fn handle_both(
     nl: &mut impl crate::netlink::NetlinkHandle,
     executor: &impl crate::nftables::manager::CommandExecutor,
 ) {
-    // MAP Rule キャッシュ保存（ステップ 4-5）
-    if let Err(e) = save_rules_cache(&config.map_rules_cache_file, &rules) {
-        warn!(path = %config.map_rules_cache_file.display(), "MAP rules cache save failed: {e}");
+    if config.use_v6plus_static_rules {
+        // 静的ルール有効時: MAP ルール更新とキャッシュ保存をスキップし、IA_PD のみ更新する
+        if !is_valid_ia_pd_for_static_rules(&ia_pd) {
+            tracing::error!(
+                ia_pd = %ia_pd,
+                "IA_PD prefix length is not /56; expected /56 for v6plus static rules (ignoring)"
+            );
+            return;
+        }
+        state.pending_ia_pd = Some(ia_pd);
+    } else {
+        // 通常動作: MAP Rule キャッシュ保存 + ルール・IA_PD 更新
+        if let Err(e) = save_rules_cache(&config.map_rules_cache_file, &rules) {
+            warn!(path = %config.map_rules_cache_file.display(), "MAP rules cache save failed: {e}");
+        }
+        state.pending_map_rules = Some(rules);
+        state.pending_ia_pd = Some(ia_pd);
     }
-    state.pending_map_rules = Some(rules);
-    state.pending_ia_pd = Some(ia_pd);
     apply_if_ready(state, config, nl, executor).await;
+}
+
+/// v6プラス静的ルール利用時に有効な IA_PD か検証する（/56 のみ有効）。
+#[cfg(target_os = "linux")]
+pub(crate) fn is_valid_ia_pd_for_static_rules(prefix: &ipnet::Ipv6Net) -> bool {
+    prefix.prefix_len() == 56
 }
 
 #[cfg(target_os = "linux")]
@@ -257,6 +301,9 @@ async fn apply_if_ready(
 ) {
     use crate::daemon::lifecycle;
 
+    // try_compute() 前に旧パラメータを退避する（修正: 旧値 vs 新値の正確な比較のため）
+    let old_params = state.params.clone();
+
     match state.try_compute() {
         Ok(true) => {
             let new_params = match state.params.clone() {
@@ -264,40 +311,49 @@ async fn apply_if_ready(
                 None => return,
             };
 
-            let old_params = state.params.clone();
-
-            // 既存パラメータがある場合は update、ない場合は apply
-            // Note: try_compute が Ok(true) を返した時点で state.params は Some に更新済み
-            // old_params = state.params（更新後）なので、実際の「旧値」は別途管理が必要
-            // ここでは state.params を old_params として、
-            // apply との分岐は tunnel_ifindex の有無で判断する
             if state.tunnel_ifindex.is_some() {
-                // 既に apply 済み → update
-                if let Some(ref old) = old_params {
-                    if lifecycle::has_changed(old, &new_params) {
-                        tracing::info!(
-                            ce_ipv6 = %new_params.ce_ipv6,
-                            ipv4 = %new_params.ipv4,
-                            psid = new_params.psid,
-                            br = %new_params.br_address,
-                            "MAP-E params changed, updating"
+                // 既に apply 済み → update または no-op
+                match old_params {
+                    Some(ref old) => {
+                        if lifecycle::has_changed(old, &new_params) {
+                            tracing::info!(
+                                ce_ipv6 = %new_params.ce_ipv6,
+                                ipv4 = %new_params.ipv4,
+                                psid = new_params.psid,
+                                br = %new_params.br_address,
+                                "MAP-E params changed, updating"
+                            );
+                            if let Err(e) = lifecycle::update(
+                                state,
+                                config,
+                                old,
+                                &new_params,
+                                nl,
+                                executor,
+                            )
+                            .await
+                            {
+                                tracing::error!("lifecycle::update failed: {e}, running cleanup");
+                                lifecycle::cleanup(state, config, &new_params, nl, executor).await;
+                                state.params = None;
+                            }
+                        }
+                        // 変化なしは何もしない
+                    }
+                    None => {
+                        // tunnel_ifindex は Some だが old_params が None: 異常状態
+                        tracing::error!(
+                            "tunnel active but old params missing; running cleanup and re-apply"
                         );
-                        if let Err(e) = lifecycle::update(
-                            state,
-                            config,
-                            old,
-                            &new_params,
-                            nl,
-                            executor,
-                        )
-                        .await
+                        lifecycle::cleanup(state, config, &new_params, nl, executor).await;
+                        if let Err(e) =
+                            lifecycle::apply(state, config, &new_params, nl, executor).await
                         {
-                            tracing::error!("lifecycle::update failed: {e}, running cleanup");
+                            tracing::error!("lifecycle::apply failed after cleanup: {e}");
                             lifecycle::cleanup(state, config, &new_params, nl, executor).await;
                             state.params = None;
                         }
                     }
-                    // 変化なしは何もしない
                 }
             } else {
                 // 初回 apply
@@ -319,10 +375,17 @@ async fn apply_if_ready(
         }
         Ok(false) => {} // 情報不足
         Err(MapEError::NoPrefixMatch) => {
-            warn!(
-                ia_pd = ?state.pending_ia_pd,
-                "no MAP rule matches CE prefix"
-            );
+            if config.use_v6plus_static_rules {
+                tracing::error!(
+                    ia_pd = ?state.pending_ia_pd,
+                    "no v6plus static MAP rule matches CE prefix (configuration mismatch)"
+                );
+            } else {
+                warn!(
+                    ia_pd = ?state.pending_ia_pd,
+                    "no MAP rule matches CE prefix"
+                );
+            }
         }
         Err(e) => {
             tracing::error!("compute_mape_params failed: {e}");
@@ -699,5 +762,28 @@ mod tests {
         }
         // Drop 後はファイルが消えていること
         assert!(!pid_path.exists());
+    }
+
+    // ─── is_valid_ia_pd_for_static_rules テスト ──────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_valid_ia_pd_for_static_rules_56() {
+        let prefix: ipnet::Ipv6Net = "2404:0100:0001:abcd::/56".parse().unwrap();
+        assert!(super::is_valid_ia_pd_for_static_rules(&prefix));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_invalid_ia_pd_for_static_rules_48() {
+        let prefix: ipnet::Ipv6Net = "2404:0100:0001::/48".parse().unwrap();
+        assert!(!super::is_valid_ia_pd_for_static_rules(&prefix));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_invalid_ia_pd_for_static_rules_64() {
+        let prefix: ipnet::Ipv6Net = "2404:0100:0001:abcd::/64".parse().unwrap();
+        assert!(!super::is_valid_ia_pd_for_static_rules(&prefix));
     }
 }

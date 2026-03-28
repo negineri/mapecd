@@ -20,7 +20,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 
 # IP アドレス・プレフィックス計算
-ipnet = { version = "2", features = ["serde"] }
+ipnet = { version = "2.12", features = ["serde"] }
 
 # DHCPv6 パケット生成・解析
 dhcproto = "0.12"

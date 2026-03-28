@@ -32,6 +32,15 @@ pub struct Config {
     /// DHCPv6 受信モード（デフォルト: capture）
     #[serde(default)]
     pub dhcpv6_mode: DhcpV6Mode,
+    /// v6プラス向け静的 MAP ルールを使用するか（デフォルト: false）。
+    ///
+    /// true の場合、起動時から静的ルール集合のみを pending_map_rules に設定し、
+    /// DHCPv6 Option 94 由来のルール受信・キャッシュ保存をスキップする。
+    /// false の場合は既存動作（キャッシュ優先 + DHCPv6 更新）を維持する。
+    ///
+    /// 注意: 環境変数上書きは未対応。既存フィールドに環境変数対応がないため本フィールドも同様。
+    #[serde(default)]
+    pub use_v6plus_static_rules: bool,
 }
 
 fn default_pid_file() -> PathBuf {
@@ -365,5 +374,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.dhcpv6_mode, DhcpV6Mode::Client);
+    }
+
+    // --- use_v6plus_static_rules ---
+
+    #[test]
+    fn test_use_v6plus_static_rules_default_false() {
+        let cfg = parse(
+            r#"
+            upstream_interface = "eth0"
+            tunnel_interface = "ip6tnl0"
+        "#,
+        )
+        .unwrap();
+        assert!(!cfg.use_v6plus_static_rules);
+    }
+
+    #[test]
+    fn test_use_v6plus_static_rules_true() {
+        let cfg = parse(
+            r#"
+            upstream_interface = "eth0"
+            tunnel_interface = "ip6tnl0"
+            use_v6plus_static_rules = true
+        "#,
+        )
+        .unwrap();
+        assert!(cfg.use_v6plus_static_rules);
     }
 }
