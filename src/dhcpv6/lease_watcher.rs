@@ -2,6 +2,10 @@
 //!
 //! `/run/systemd/netif/leases/<ifindex>` を inotify で監視し、
 //! `X-DELEGATED-PREFIX` フィールドの変化を `LeaseEvent` として送出する。
+//!
+//! リースディレクトリは `DEFAULT_LEASES_DIR` を使うが、`run_lease_watcher` /
+//! `lease_file_path` に `lease_dir` パラメータを渡すことで差し替え可能。
+//! 統合テストではこの機構を使って `tempdir` を指定する。
 
 use std::ffi::OsStr;
 use std::os::unix::io::{AsFd as _, AsRawFd, RawFd};
@@ -27,7 +31,10 @@ impl AsRawFd for InotifyFd {
     }
 }
 
-const LEASES_DIR: &str = "/run/systemd/netif/leases";
+/// 本番環境でのリースファイルディレクトリ。
+///
+/// テスト時は `run_lease_watcher` / `lease_file_path` の `lease_dir` パラメータで上書きできる。
+pub const DEFAULT_LEASES_DIR: &str = "/run/systemd/netif/leases";
 
 // ────────────────────────────────────────────────────────────────────
 // パブリック API
@@ -35,18 +42,21 @@ const LEASES_DIR: &str = "/run/systemd/netif/leases";
 
 /// inotify による systemd-networkd リースファイル監視タスク。
 ///
-/// `/run/systemd/netif/leases/` が存在しない場合は `warn` を出力して終了する。
+/// `lease_dir` が存在しない場合は `warn` を出力して終了する。
 /// `upstream_interface` に対応する ifindex のファイルに `IN_CLOSE_WRITE` /
 /// `IN_MOVED_TO` イベントが発生した場合のみパースを実施する。
+///
+/// 本番用途では `lease_dir` に `Path::new(DEFAULT_LEASES_DIR)` を渡す。
+/// テスト時は `tempdir` を渡すことで実 `/run/systemd/netif/leases/` に依存せずに検証できる。
 pub async fn run_lease_watcher(
     upstream_interface: &str,
+    lease_dir: &Path,
     tx: mpsc::Sender<LeaseEvent>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let dir = Path::new(LEASES_DIR);
-    if !dir.exists() {
+    if !lease_dir.exists() {
         warn!(
-            path = LEASES_DIR,
+            path = %lease_dir.display(),
             "systemd-networkd lease directory not found; lease_watcher exiting. \
              Start mapecd after systemd-networkd or configure After=systemd-networkd.service."
         );
@@ -60,14 +70,14 @@ pub async fn run_lease_watcher(
         })?;
 
     let target_name = ifindex.to_string();
-    let lease_file = dir.join(&target_name);
+    let lease_file = lease_dir.join(&target_name);
 
     // inotify 初期化（NONBLOCK: AsyncFd と組み合わせるために必須）
     let inotify = Inotify::init(InitFlags::IN_CLOEXEC | InitFlags::IN_NONBLOCK)
         .context("inotify_init failed")?;
     inotify
         .add_watch(
-            dir,
+            lease_dir,
             AddWatchFlags::IN_CLOSE_WRITE | AddWatchFlags::IN_MOVED_TO,
         )
         .context("inotify_add_watch failed")?;
@@ -159,10 +169,12 @@ pub fn parse_delegated_prefix(content: &str) -> Option<Ipv6Net> {
 
 /// upstream_interface に対応するリースファイルパスを返す。
 ///
+/// `lease_dir` には通常 `Path::new(DEFAULT_LEASES_DIR)` を渡す。
+/// テスト時は `tempdir` を渡すことで実ファイルシステムに依存せずに検証できる。
 /// インターフェースが存在しない場合は `None`。
-pub fn lease_file_path(upstream_interface: &str) -> Option<PathBuf> {
+pub fn lease_file_path(upstream_interface: &str, lease_dir: &Path) -> Option<PathBuf> {
     let ifindex = nix::net::if_::if_nametoindex(upstream_interface).ok()?;
-    Some(PathBuf::from(LEASES_DIR).join(ifindex.to_string()))
+    Some(lease_dir.join(ifindex.to_string()))
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -240,15 +252,90 @@ LIFETIME=86400
     }
 
     /// inotify 統合テスト（実 Linux 環境でのみ動作）
+    ///
+    /// `run_lease_watcher` に `tempdir` を渡し、`lo` インターフェース（ifindex=1）向けの
+    /// リースファイルを更新することで inotify イベントが届くことを確認する。
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    #[ignore = "requires real Linux inotify and filesystem"]
     async fn test_run_lease_watcher_integration() {
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
         let dir = tempfile::tempdir().unwrap();
-        // このテストはディレクトリを /run/systemd/netif/leases に向けられないため
-        // 実際の run_lease_watcher は呼び出さず、パース関数のみ確認する
-        let path = dir.path().join("1");
-        std::fs::write(&path, "X-DELEGATED-PREFIX=2001:db8::/48\n").unwrap();
-        assert!(parse_lease_file(&path).is_some());
+        // lo インターフェースの ifindex は Network Namespace 内でも常に 1
+        let lease_file = dir.path().join("1");
+
+        // 初期ファイル作成（X-DELEGATED-PREFIX なし）
+        std::fs::write(&lease_file, "ADDRESS=192.168.1.1\n").unwrap();
+
+        let cancel = CancellationToken::new();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let dir_path = dir.path().to_path_buf();
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_lease_watcher("lo", &dir_path, tx, cancel_clone).await
+        });
+
+        // ファイル更新（X-DELEGATED-PREFIX を追加）
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        std::fs::write(
+            &lease_file,
+            "ADDRESS=192.168.1.1\nX-DELEGATED-PREFIX=2001:db8::/48\n",
+        )
+        .unwrap();
+
+        // イベント受信を待機（最大 2 秒）
+        let result = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(result.is_ok(), "inotify event not received within 2s");
+        let LeaseEvent(prefix) = result.unwrap().unwrap();
+        assert_eq!(prefix.prefix_len(), 48);
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
+
+    /// IN_MOVED_TO イベントテスト（atomic write による rename のシミュレーション）
+    ///
+    /// `systemd-networkd` は tmpfile → rename（`IN_MOVED_TO`）でリースファイルを更新する。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_run_lease_watcher_moved_to() {
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lease_file = dir.path().join("1");
+        std::fs::write(&lease_file, "ADDRESS=192.168.1.1\n").unwrap();
+
+        let cancel = CancellationToken::new();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let dir_path = dir.path().to_path_buf();
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_lease_watcher("lo", &dir_path, tx, cancel_clone).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // atomic write で rename をシミュレート（IN_MOVED_TO を発生させる）
+        let tmp = dir.path().join(".tmp_lease");
+        std::fs::write(
+            &tmp,
+            "ADDRESS=192.168.1.1\nX-DELEGATED-PREFIX=2001:db8:1::/56\n",
+        )
+        .unwrap();
+        std::fs::rename(&tmp, &lease_file).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(result.is_ok(), "inotify IN_MOVED_TO event not received within 2s");
+        let LeaseEvent(prefix) = result.unwrap().unwrap();
+        assert_eq!(prefix.prefix_len(), 56);
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
     }
 }

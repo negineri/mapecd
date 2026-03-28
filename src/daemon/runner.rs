@@ -130,6 +130,7 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
         tokio::spawn(async move {
             if let Err(e) = lease_watcher::run_lease_watcher(
                 &lease_interface,
+                std::path::Path::new(lease_watcher::DEFAULT_LEASES_DIR),
                 lease_tx_watcher,
                 lease_cancel,
             )
@@ -142,7 +143,10 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
 
     // (5-b) 初回リースファイル読み込み（inotify 登録後・イベントループ開始前）
     // inotify 登録 → 初回読み込みの順序により、登録前のファイル更新を見落とさない
-    if let Some(path) = lease_watcher::lease_file_path(&config.upstream_interface) {
+    if let Some(path) = lease_watcher::lease_file_path(
+        &config.upstream_interface,
+        std::path::Path::new(lease_watcher::DEFAULT_LEASES_DIR),
+    ) {
         if let Some(prefix) = lease_watcher::parse_lease_file(&path) {
             tracing::info!(prefix = %prefix, "initial IA_PD loaded from lease file");
             let _ = lease_tx.send(LeaseEvent(prefix)).await;
