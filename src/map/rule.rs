@@ -6,6 +6,21 @@ use std::{
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 
+/// CE IPv6 アドレスの構成形式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CeFormat {
+    /// RFC 7597 Section 5.2 準拠。
+    /// bits 80-111: IPv4 アドレス（32ビット連続）
+    /// bits 112-127: PSID << (16-k)
+    Rfc7597,
+    /// v6プラス（OCN）非 RFC 形式（docs/v6plus-maprule.js の rfc=false 相当）。
+    /// bits 64-79: 0x00 | 第1オクテット（上位バイト=0x00、下位バイトに第1オクテット）
+    /// bits 80-95: (第2オクテット << 8) | 第3オクテット
+    /// bits 96-111: 第4オクテット << 8
+    /// bits 112-127: PSID << 8
+    V6Plus,
+}
+
 /// OPTION_S46_PORTPARAMS から取得したポートパラメータ。
 ///
 /// 省略時のデフォルト: psid_offset=0 (a=0), psid_length=0 (k=0)。
@@ -47,7 +62,7 @@ pub struct MapRule {
 /// MAP-E 計算結果。CE IPv6 アドレス・IPv4 アドレス・PSID・ポート範囲を保持する。
 #[derive(Debug, Clone)]
 pub struct MapeParams {
-    /// CE IPv6 アドレス (RFC 7597 Section 5.2 に従い導出)
+    /// CE IPv6 アドレス（`ce_format` に従い導出）
     pub ce_ipv6: Ipv6Addr,
     /// 導出された IPv4 アドレス
     pub ipv4: Ipv4Addr,
@@ -59,4 +74,6 @@ pub struct MapeParams {
     pub br_address: Ipv6Addr,
     /// 使用した MAP ルール
     pub rule: MapRule,
+    /// CE IPv6 アドレスの構成に使用した形式。
+    pub ce_format: CeFormat,
 }

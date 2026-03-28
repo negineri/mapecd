@@ -9,7 +9,7 @@ use crate::{
     error::MapEError,
     map::{
         calc::compute_mape_params,
-        rule::{MapRule, MapeParams},
+        rule::{CeFormat, MapRule, MapeParams},
     },
 };
 
@@ -46,7 +46,7 @@ impl DaemonState {
     /// - `Ok(false)`: 情報が不足しているため計算をスキップした。
     /// - `Err(NoPrefixMatch)`: マッチするルールが存在しない。
     /// - `Err(...)`: `compute_mape_params` のその他エラー。
-    pub fn try_compute(&mut self) -> Result<bool, MapEError> {
+    pub fn try_compute(&mut self, format: CeFormat) -> Result<bool, MapEError> {
         let rules = match &self.pending_map_rules {
             Some(r) if !r.is_empty() => r,
             _ => return Ok(false),
@@ -60,7 +60,7 @@ impl DaemonState {
             if !rule.ipv6_prefix.contains(&ce_prefix.addr()) {
                 continue;
             }
-            match compute_mape_params(ce_prefix, rule) {
+            match compute_mape_params(ce_prefix, rule, format) {
                 Ok(p) => {
                     self.params = Some(p);
                     return Ok(true);
@@ -84,7 +84,7 @@ mod tests {
     use std::net::Ipv6Addr;
 
     use super::*;
-    use crate::map::rule::PortParams;
+    use crate::map::rule::{CeFormat, PortParams};
 
     fn make_rule(ipv6_prefix: &str, ipv4_prefix: &str, ea_length: u8) -> MapRule {
         MapRule {
@@ -101,7 +101,7 @@ mod tests {
     fn test_try_compute_no_rules() {
         let mut state = DaemonState::new();
         state.pending_ia_pd = Some("2001:db8:0:1::/64".parse().unwrap());
-        assert_eq!(state.try_compute().unwrap(), false);
+        assert_eq!(state.try_compute(CeFormat::Rfc7597).unwrap(), false);
         assert!(state.params.is_none());
     }
 
@@ -109,7 +109,7 @@ mod tests {
     fn test_try_compute_no_ia_pd() {
         let mut state = DaemonState::new();
         state.pending_map_rules = Some(vec![make_rule("2001:db8::/32", "192.0.2.0/24", 40)]);
-        assert_eq!(state.try_compute().unwrap(), false);
+        assert_eq!(state.try_compute(CeFormat::Rfc7597).unwrap(), false);
         assert!(state.params.is_none());
     }
 
@@ -119,7 +119,7 @@ mod tests {
         state.pending_map_rules = Some(vec![make_rule("2001:db8::/32", "192.0.2.0/24", 40)]);
         // ce_prefix が rule と一致しない
         state.pending_ia_pd = Some("2001:db9::/48".parse().unwrap());
-        assert!(matches!(state.try_compute(), Err(MapEError::NoPrefixMatch)));
+        assert!(matches!(state.try_compute(CeFormat::Rfc7597), Err(MapEError::NoPrefixMatch)));
     }
 
     #[test]
@@ -131,12 +131,13 @@ mod tests {
             Some(vec![make_rule("2001:db8::/32", "192.0.2.0/24", 16)]);
         state.pending_ia_pd = Some("2001:db8:6405::/48".parse().unwrap());
 
-        assert_eq!(state.try_compute().unwrap(), true);
+        assert_eq!(state.try_compute(CeFormat::Rfc7597).unwrap(), true);
         let params = state.params.as_ref().unwrap();
         assert_eq!(
             params.ipv4,
             "192.0.2.100".parse::<std::net::Ipv4Addr>().unwrap()
         );
         assert_eq!(params.psid, 5);
+        assert_eq!(params.ce_format, CeFormat::Rfc7597);
     }
 }

@@ -326,7 +326,7 @@ mod tests {
     use super::*;
     use crate::{
         error::MapEError,
-        map::rule::{MapRule, MapeParams, PortParams},
+        map::rule::{CeFormat, MapRule, MapeParams, PortParams},
         netlink::NetlinkHandle,
         nftables::manager::CommandExecutor,
     };
@@ -460,6 +460,7 @@ mod tests {
                 br_address: br.parse().unwrap(),
                 port_params: PortParams { psid_offset: 0, psid_length: 0 },
             },
+            ce_format: CeFormat::Rfc7597,
         }
     }
 

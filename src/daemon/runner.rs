@@ -27,7 +27,7 @@ use tracing::warn;
 use crate::{config::Config, map::rule::MapRule};
 
 #[cfg(target_os = "linux")]
-use crate::{daemon::state::DaemonState, error::MapEError, map::v6plus_rules};
+use crate::{daemon::state::DaemonState, error::MapEError, map::{rule::CeFormat, v6plus_rules}};
 
 // ────────────────────────────────────────────────────────────────────
 // エントリポイント
@@ -89,6 +89,7 @@ async fn start_linux(config: Arc<Config>, cancel: CancellationToken) -> anyhow::
         );
         tracing::info!(
             rules = v6plus_rules::RULE_COUNT,
+            ce_format = "V6Plus",
             "v6plus static MAP rules enabled; using static rules (cache and DHCPv6 rules ignored)"
         );
         state.pending_map_rules = Some(v6plus_rules::V6PLUS_MAP_RULES.to_vec());
@@ -304,7 +305,12 @@ async fn apply_if_ready(
     // try_compute() 前に旧パラメータを退避する（修正: 旧値 vs 新値の正確な比較のため）
     let old_params = state.params.clone();
 
-    match state.try_compute() {
+    let format = if config.use_v6plus_static_rules {
+        CeFormat::V6Plus
+    } else {
+        CeFormat::Rfc7597
+    };
+    match state.try_compute(format) {
         Ok(true) => {
             let new_params = match state.params.clone() {
                 Some(p) => p,
