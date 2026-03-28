@@ -298,6 +298,26 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_ruleset_masquerade_multiple_ranges() {
+        let ranges = vec![4101u16..=4356u16, 8197u16..=8452u16];
+        let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
+
+        // 各ポート範囲に対して個別の masquerade ルールが生成されること
+        assert!(
+            ruleset.contains(
+                "oifname \"ip6tnl0\" meta l4proto { tcp, udp } masquerade to :4101-4356"
+            ),
+            "first range masquerade rule should be present"
+        );
+        assert!(
+            ruleset.contains(
+                "oifname \"ip6tnl0\" meta l4proto { tcp, udp } masquerade to :8197-8452"
+            ),
+            "second range masquerade rule should be present"
+        );
+    }
+
+    #[test]
     fn test_generate_ruleset_mss_clamp_both_directions() {
         let ranges = vec![1u16..=65535u16];
         let ruleset = generate_ruleset(&ranges, "ip6tnl0", br());
