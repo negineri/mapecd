@@ -1,0 +1,25 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/workspace/target
+    cap_add:
+      - NET_ADMIN
+    working_dir: /workspace
+    command: >
+      sh -c "
+        echo '=== ユニットテスト ===' &&
+        cargo test --lib &&
+        echo '=== 統合テスト ===' &&
+        cargo test --test '*_integration' -- --nocapture --test-threads=1
+      "
+
+volumes:
+  cargo-cache:
+  cargo-git:
+  target-cache:

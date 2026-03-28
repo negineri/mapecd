@@ -75,6 +75,52 @@ dhcpv6_mode        = "capture"
 
 設定ファイルの全フィールドは [docs/config-format.md](docs/config-format.md) を参照してください。
 
+## テスト
+
+### ユニットテスト
+
+一般ユーザーで実行できます。
+
+```bash
+cargo test --lib
+```
+
+### 統合テスト
+
+Linux Network Namespace・nftables・Netlink を使用するため `CAP_NET_ADMIN`（または root）が必要です。
+
+```bash
+sudo -E cargo test --test '*_integration' -- --nocapture --test-threads=1
+```
+
+| テストファイル | 対象 | 必要な権限 |
+|---|---|---|
+| `netlink_integration` | ip6tnl トンネル・アドレス・ルート操作 | `CAP_NET_ADMIN` |
+| `nftables_integration` | nft ルールセット適用・構文検証 | `CAP_NET_ADMIN` |
+| `inotify_integration` | リースファイル監視（inotify） | 一般ユーザーで可 |
+| `sysctl_integration` | `/proc/sys/net/` 読み書き | `CAP_NET_ADMIN` |
+| `full_lifecycle_integration` | apply/update/cleanup E2E | `CAP_NET_ADMIN` |
+
+> **注意**: `sudo -E` で `CARGO_HOME` 等の環境変数を引き継ぐことで、既存のビルドキャッシュが再利用されます。`--test-threads=1` は Network Namespace の `setns` がスレッド単位で有効なため必須です。
+
+### Docker を使ったテスト（root に Rust が不要）
+
+ホストに Rust をインストールせずに統合テストを実行できます。
+
+```bash
+# ユニットテスト + 統合テストをまとめて実行
+docker compose -f docker-compose.test.yml run --rm test
+
+# ユニットテストのみ
+docker compose -f docker-compose.test.yml run --rm test cargo test --lib
+
+# 統合テストのみ
+docker compose -f docker-compose.test.yml run --rm test \
+  cargo test --test '*_integration' -- --nocapture --test-threads=1
+```
+
+Cargo のビルドキャッシュは Docker ボリュームに保持されるため、2 回目以降は高速に実行されます。
+
 ## ログ
 
 `--log-level` オプションでログレベルを指定します。tracing の directive 構文も使用できます。
